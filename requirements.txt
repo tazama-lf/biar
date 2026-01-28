@@ -1,0 +1,26 @@
+# Core Python packages for Tazama Project
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.4.2
+nest-asyncio==1.5.8
+
+# PySpark and related
+pyspark==3.4.2
+findspark==2.0.1
+pandas==2.1.3
+numpy==1.26.2
+pyarrow==14.0.1
+
+# Data visualization
+plotly==5.18.0
+kaleido==0.2.1
+
+# Date handling
+python-dateutil==2.8.2
+
+# JupyterHub and Jupyter
+jupyterhub==4.0.2
+jupyterlab==4.0.9
+notebook==7.0.6
+ipykernel==6.27.0
+ipywidgets==8.1.1
