@@ -9,6 +9,14 @@
 - 16 GB RAM minimum (32 GB recommended)
 - 50 GB disk space
 
+### Build the Infrastructure required to run data lakehouse: 
+
+Use docker-compose.infra.yaml file
+```bash
+docker-compose -f docker-compose.infra.yaml up -d
+```
+This will deploy containers of Tike, Solr, Nifi, Ozone and Debezium Kafka
+
 ### Build the Docker Image
 
 ```bash
