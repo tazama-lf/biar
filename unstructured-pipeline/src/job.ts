@@ -81,7 +81,7 @@ class DocumentProcessor {
 
       const extraction = await this.tika.extract(fileBuffer);
       this.logger.log(`Content length: ${extraction.text.length}`);
-
+      
       const contentForSolr =
         extraction.text.length > this.config.MAX_SOLR_CONTENT
           ? extraction.text.substring(0, this.config.MAX_SOLR_CONTENT)
