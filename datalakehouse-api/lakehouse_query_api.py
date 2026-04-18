@@ -928,4 +928,4 @@ async def invalidate_schema_cache_endpoint():
 # Run server
 # ============================================================
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("APP_PORT", "8282")), loop="asyncio")
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("DATALAKEHOUSE_API_PORT", "8282")), loop="asyncio")

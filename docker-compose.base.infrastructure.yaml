@@ -14,7 +14,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-      - env/tika.env
+    environment:
+      JAVA_OPTS=-Xms256m -Xmx512m
     ports:
       - "${TIKA_PORT}:9998"
 
@@ -24,11 +25,12 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-      - env/solr.env
     ports:
       - "${SOLR_PORT}:8983"
     volumes:
       - solr_data:/var/solr
+    environment:
+      SOLR_HEAP=512m
     command:
       - sh
       - -c
@@ -44,7 +46,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-      - env/nifi.env
+    environment:
+      SINGLE_USER_CREDENTIALS_USERNAME=admin
+      SINGLE_USER_CREDENTIALS_PASSWORD=admin123456789
+      NIFI_JVM_HEAP_INIT=512m
+      NIFI_JVM_HEAP_MAX=1g
     ports:
       - "${NIFI_PORT}:8088"
     volumes:
@@ -62,12 +68,13 @@ services:
     env_file:
       - .env
       - docker-config
-      - env/scm.env
     ports:
       - "${SCM_UI_PORT}:9876"
       - "${SCM_CLIENT_PORT}:9860"
     environment:
       <<: *ozone-replication
+      ENSURE_SCM_INITIALIZED=/data/metadata/scm/current/VERSION
+      OZONE-SITE.XML_hdds.scm.safemode.min.datanode=1
     command: ["ozone", "scm"]
     volumes:
       - scm_data:/data
@@ -78,13 +85,13 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-      - docker-config
-      - env/om.env
+      - docker-configv
     ports:
       - "${OM_UI_PORT}:9874"
       - "${OM_RPC_PORT}:9862"
     environment:
       <<: *ozone-replication
+      ENSURE_OM_INITIALIZED=/data/metadata/om/current/VERSION
     command: ["ozone", "om"]
     volumes:
       - om_data:/data
@@ -97,9 +104,13 @@ services:
     env_file:
       - .env
       - docker-config
-      - env/datanode1.env
     environment:
       <<: *ozone-replication
+      OZONE-SITE.XML_hdds.datanode.hostname=ozone-datanode-1
+      OZONE-SITE.XML_hdds.datanode.bind.host=0.0.0.0
+      OZONE-SITE.XML_hdds.datanode.address=ozone-datanode-1:9864
+      OZONE-SITE.XML_hdds.container.ipc.address=ozone-datanode-1:9859
+      OZONE-SITE.XML_hdds.container.ratis.ipc.address=ozone-datanode-1:9858
     command: ["ozone", "datanode"]
     volumes:
       - datanode1_data:/data
@@ -112,9 +123,14 @@ services:
     env_file:
       - .env
       - docker-config
-      - env/datanode2.env
     environment:
       <<: *ozone-replication
+      OZONE-SITE.XML_hdds.datanode.hostname=ozone-datanode-2
+      OZONE-SITE.XML_hdds.datanode.bind.host=0.0.0.0
+      OZONE-SITE.XML_hdds.datanode.address=ozone-datanode-2:9864
+      OZONE-SITE.XML_hdds.container.ipc.address=ozone-datanode-2:9859
+      OZONE-SITE.XML_hdds.container.ratis.ipc.address=ozone-datanode-2:9858
+
     command: ["ozone", "datanode"]
     volumes:
       - datanode2_data:/data
@@ -127,9 +143,13 @@ services:
     env_file:
       - .env
       - docker-config
-      - env/datanode3.env
     environment:
       <<: *ozone-replication
+      OZONE-SITE.XML_hdds.datanode.hostname=ozone-datanode-3
+      OZONE-SITE.XML_hdds.datanode.bind.host=0.0.0.0
+      OZONE-SITE.XML_hdds.datanode.address=ozone-datanode-3:9864
+      OZONE-SITE.XML_hdds.container.ipc.address=ozone-datanode-3:9859
+      OZONE-SITE.XML_hdds.container.ratis.ipc.address=ozone-datanode-3:9858
     command: ["ozone", "datanode"]
     volumes:
       - datanode3_data:/data
@@ -142,11 +162,12 @@ services:
     env_file:
       - .env
       - docker-config
-      - env/recon.env
     ports:
       - "${RECON_PORT}:9888"
     environment:
       <<: *ozone-replication
+      OZONE-SITE.XML_ozone.recon.address=recon:9891
+      OZONE-SITE.XML_ozone.recon.http-address=0.0.0.0:9888
     command: ["ozone", "recon"]
     volumes:
       - recon_data:/data
@@ -161,7 +182,6 @@ services:
     env_file:
       - .env
       - docker-config
-      - env/s3g.env
     ports:
       - "${S3G_PORT}:9878"
       - "${S3G_INTERNAL_PORT}:19878"
