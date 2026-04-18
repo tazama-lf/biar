@@ -127,8 +127,9 @@ class DocumentProcessor {
 
 const startProcessor = (): void => {
   const processor = new DocumentProcessor();
-  const cronEnabled = process.env.CRON_ENABLED === 'true';
-  const cronSchedule = process.env.CRON_SCHEDULE ?? '*/5 * * * *';
+  const cfg = (processor as unknown as { config: Configuration }).config;
+  const cronEnabled = cfg.CRON_ENABLED;
+  const cronSchedule = cfg.CRON_SCHEDULE ?? '*/5 * * * *';
 
 
   let running = false;
