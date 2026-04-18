@@ -46,6 +46,6 @@ RUN mkdir -p /opt/Tazama_Warehouse
 
 VOLUME ["/opt/Tazama_Warehouse"]
 
-EXPOSE 8282
+EXPOSE 8181 8282
 
-CMD ["python", "lakehouse_query_api.py"]
+CMD ["sh", "-c", "python FAST_API_For_BronzeRawData.py & python lakehouse_query_api.py"]
