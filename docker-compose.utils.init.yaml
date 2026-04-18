@@ -5,16 +5,22 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-      - env/aws-cli.env
     depends_on:
       - s3g
     entrypoint: >
       /bin/sh -c "
-      sleep 15;
-      aws configure set aws_access_key_id $$AWS_ACCESS_KEY_ID &&
-      aws configure set aws_secret_access_key $$AWS_SECRET_ACCESS_KEY &&
-      aws configure set default.region $$AWS_DEFAULT_REGION &&
-      aws --endpoint-url $$AWS_ENDPOINT_URL s3 mb s3://$$AWS_BUCKET_NAME || true;
+      export AWS_ACCESS_KEY_ID=$$S3A_ACCESS_KEY;
+      export AWS_SECRET_ACCESS_KEY=$$S3A_SECRET_KEY;
+      export AWS_DEFAULT_REGION=us-east-1;
+
+      echo 'Waiting for S3...';
+      until aws --endpoint-url $$S3A_ENDPOINT s3 ls > /dev/null 2>&1; do
+        sleep 3;
+      done;
+
+      echo 'Creating bucket if not exists...';
+      aws --endpoint-url $$S3A_ENDPOINT s3 mb s3://$$AWS_BUCKET_NAME || true;
+
       tail -f /dev/null
       "
 
@@ -24,7 +30,6 @@ services:
     restart: on-failure
     env_file:
       - .env
-      - env/nifi-init.env
     depends_on:
       - nifi
     volumes:

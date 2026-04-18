@@ -225,4 +225,4 @@ def submit(req: TriggerRequest):
 # START SERVER
 # ======================================================
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("APP_PORT", "7619")), loop="asyncio")
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("ORCHESTRATOR_PORT", "7619")), loop="asyncio")

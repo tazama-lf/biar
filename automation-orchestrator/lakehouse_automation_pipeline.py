@@ -39,9 +39,9 @@ def get_spark_session():
     jars_env = _env("SPARK_JARS", ",".join(default_jars))
     jar_files = [j.strip() for j in jars_env.split(",") if j.strip()]
 
-    s3_endpoint = _env("S3A_ENDPOINT", "http://10.10.80.20:9878")
-    s3_access_key = _env("S3A_ACCESS_KEY", "hassan")
-    s3_secret_key = _env("S3A_SECRET_KEY", "hassan")
+    s3_endpoint = _env("S3A_ENDPOINT", "")
+    s3_access_key = _env("S3A_ACCESS_KEY", "")
+    s3_secret_key = _env("S3A_SECRET_KEY", "")
 
     spark = (
         SparkSession.builder

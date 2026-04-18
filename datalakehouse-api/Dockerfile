@@ -17,7 +17,7 @@ ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV SPARK_HOME=/opt/spark
 ENV PATH=$SPARK_HOME/bin:$JAVA_HOME/bin:$PATH
 ENV SPARK_JARS=/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar
-ENV APP_PORT=8282
+ENV DATALAKEHOUSE_API_PORT=8282
 
 WORKDIR /app
 
@@ -46,6 +46,6 @@ RUN mkdir -p /opt/Tazama_Warehouse
 
 VOLUME ["/opt/Tazama_Warehouse"]
 
-EXPOSE 8181 8282
+EXPOSE 8181 ${DATALAKEHOUSE_API_PORT:-8282}
 
 CMD ["sh", "-c", "python FAST_API_For_BronzeRawData.py & python lakehouse_query_api.py"]
