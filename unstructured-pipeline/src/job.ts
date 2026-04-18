@@ -57,13 +57,16 @@ class DocumentProcessor {
     try {
       await this.couchdb.updateStatus(docId, 'PROCESSING');
 
-      const attachmentNames = Object.keys(doc._attachments!);
+      const attachmentNames = doc._attachments ? Object.keys(doc._attachments) : [];
       if (attachmentNames.length === 0) {
         throw new Error('No attachments found');
       }
-
       const [attachmentName] = attachmentNames;
-      const [fileMeta] = doc.metadata!;
+
+      if (!doc.metadata || doc.metadata.length === 0) {
+        throw new Error('Document metadata missing');
+      }
+      const [fileMeta] = doc.metadata;
 
       if (fileMeta.fileSize > this.config.MAX_FILE_SIZE_MB * BYTES_PER_MB) {
         throw new Error(
