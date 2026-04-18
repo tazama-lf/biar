@@ -37,7 +37,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Application code ──────────────────────────
-COPY lakehouse_query_api.py .
+COPY *.py .
 
 # ── Warehouse mount-point ─────────────────────
 # Mount your local warehouse here:
