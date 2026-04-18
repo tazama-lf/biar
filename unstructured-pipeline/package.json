@@ -59,7 +59,7 @@
     "typescript"
   ],
   "author": "BIAR Team",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "lint-staged": {
     "*.{js,ts}": [
       "eslint --fix",
