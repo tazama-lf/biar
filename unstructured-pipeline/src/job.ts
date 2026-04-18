@@ -68,8 +68,8 @@ class DocumentProcessor {
       if (fileMeta.fileSize > this.config.MAX_FILE_SIZE_MB * BYTES_PER_MB) {
         throw new Error(
           'File too large: ' +
-            Math.round(fileMeta.fileSize / BYTES_PER_MB) +
-            'MB'
+          Math.round(fileMeta.fileSize / BYTES_PER_MB) +
+          'MB'
         );
       }
 
@@ -81,7 +81,7 @@ class DocumentProcessor {
 
       const extraction = await this.tika.extract(fileBuffer);
       this.logger.log(`Content length: ${extraction.text.length}`);
-      
+
       const contentForSolr =
         extraction.text.length > this.config.MAX_SOLR_CONTENT
           ? extraction.text.substring(0, this.config.MAX_SOLR_CONTENT)
@@ -125,16 +125,30 @@ class DocumentProcessor {
 const startProcessor = (): void => {
   const processor = new DocumentProcessor();
   const cronEnabled = process.env.CRON_ENABLED === 'true';
-  const cronSchedule = process.env.CRON_SCHEDULE ?? '*/5 * * * * *';
+  const cronSchedule = process.env.CRON_SCHEDULE ?? '*/5 * * * *';
+
+
+  let running = false;
+
+  const safeRun = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+
+    try {
+      await processor.run();
+    } finally {
+      running = false;
+    }
+  };
 
   if (cronEnabled) {
     // eslint-disable-next-line no-console -- Startup log before logger is available externally
     console.log(`Starting cron with schedule: ${cronSchedule}`);
     cron.schedule(cronSchedule, () => {
-      processor.run();
+      void safeRun();
     });
   } else {
-    processor.run();
+    void safeRun();
   }
 };
 
