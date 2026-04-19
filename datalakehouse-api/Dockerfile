@@ -29,7 +29,6 @@ ENV HUDI_BUNDLE_VERSION=0.14.1
 ENV SPARK_HOME=/opt/spark
 ENV PATH=$SPARK_HOME/bin:$PATH
 ENV SPARK_JARS=/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar
-ENV DATALAKEHOUSE_API_PORT=8282
 
 WORKDIR /app
 
@@ -61,7 +60,7 @@ RUN mkdir -p /opt/Tazama_Warehouse
 VOLUME ["/opt/Tazama_Warehouse"]
 
 # ── Ports ────────────────────────────────────
-EXPOSE 8181 ${DATALAKEHOUSE_API_PORT:-8282}
+EXPOSE 8181
 
 # ── Start both APIs ──────────────────────────
 CMD ["sh", "-c", "python lakehouse_query_api.py"]

@@ -50,8 +50,8 @@ EXPOSE 7619
 # Copy code
 COPY . .
 
-# Permissions (optional)
-RUN chmod -R 777 /app
+# # Permissions (optional)
+# RUN chmod -R 077 /app
 
 # Run FastAPI
-CMD ["sh", "-c", "uvicorn automation_orchestrator_api:app --host 0.0.0.0 --port ${ORCHESTRATOR_PORT:-7619} --log-level info"]
+CMD ["uvicorn", "automation_orchestrator_api:app", "--host", "0.0.0.0", "--port", "7619", "--log-level", "info"]

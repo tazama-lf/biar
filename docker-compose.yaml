@@ -218,7 +218,7 @@ services:
     environment:
       WAREHOUSE_ROOT: /opt/Tazama_Warehouse
     ports:
-      - "${DATALAKEHOUSE_API_PORT}:8282"
+      - 8282:8282
     volumes:
       - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Warehouse
     depends_on:

@@ -109,17 +109,34 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="spark-worker")
 SPARK_JOB_TIMEOUT = 120
 
 
-async def run_in_executor(fn, *args, timeout: float = SPARK_JOB_TIMEOUT):
-    """Run a blocking function in the thread pool with an optional timeout."""
+async def run_in_executor(fn, *args, timeout: float = SPARK_JOB_TIMEOUT, job_group: str = None):
+    """Run a blocking function in the thread pool with an optional timeout and Spark job group cancellation."""
+    if job_group is None:
+        job_group = str(uuid.uuid4())
+
+    spark = get_spark()
+    
+    def wrapped_fn(*args):
+        with _spark_lock:
+            spark.sparkContext.setJobGroup(job_group, f"Spark job for {fn.__name__}", interruptOnCancel=True)
+        try:
+            return fn(*args, job_group=job_group)
+        finally:
+            with _spark_lock:
+                spark.sparkContext.clearJobGroup()
+
     loop = asyncio.get_event_loop()
-    future = loop.run_in_executor(_executor, fn, *args)
+    future = loop.run_in_executor(_executor, wrapped_fn, *args)
     try:
         return await asyncio.wait_for(future, timeout=timeout)
     except asyncio.TimeoutError:
+        logger.warning(f"Cancelling Spark job group {job_group} due to timeout")
+        with _spark_lock:
+            spark.sparkContext.cancelJobGroup(job_group)
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={"status": "error", "code": 504,
-                    "message": f"Spark job exceeded timeout of {timeout}s"}
+                    "message": f"Spark job {job_group} exceeded timeout of {timeout}s"}
         )
 
 # Custom exception handler for validation errors
@@ -244,18 +261,13 @@ def compute_record_hash(df, exclude_cols=None):
         )
     )
 
-
-
-
-
-
 # ============================================================
 # Helper: Query Hudi data (Gold registry)
 # ============================================================
 
 MAX_ROWS = 10000
 
-def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = None, limit: int = None):
+def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = None, limit: int = None, job_group: str = None):
     """Synchronous query — called from thread pool."""
     if table_name not in GOLD_PATHS:
         raise ValueError(f"Table '{table_name}' not found in Gold registry")
@@ -299,8 +311,9 @@ def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = N
 
 
 import re
+import uuid
 
-def _execute_sql_sync(sql_query: str, limit: int = None):
+def _execute_sql_sync(sql_query: str, limit: int = None, job_group: str = None):
     """
     Serialised temp-view registration + SQL execution.
     Uses a module-level lock to prevent concurrent requests from corrupting each
@@ -440,7 +453,7 @@ async def execute_sql(request: SQLQueryRequest):
     ]
     q_upper = sql_query.upper()
 
-    for pattern in forbidden_patterns:
+    for pattern in forbidden_patterns: 
         if re.search(pattern, q_upper):
             raise HTTPException(
                 status_code=403,
@@ -465,83 +478,6 @@ async def execute_sql(request: SQLQueryRequest):
             detail={"status": "error", "code": 500, "message": "SQL Query error", "error_details": str(e)[:120]}
         )
 
-
-# FIX: async, thread-pool dispatch, safe temp-file handling
-
-    # Parse JSON eagerly in the async thread so we fail fast before touching Spark
-    try:
-        payload_data = json.loads(request.payload)
-    except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"status": "error", "code": 400, "message": "Invalid JSON payload"}
-        )
-
-    # FIX: write the temp file and keep its path; Spark reads it synchronously inside the thread-pool job, so the file is guaranteed to exist for the entire duration of the Spark read. We only delete it AFTER the pipeline returns.
-    
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.jsonl') as tmp:
-            tmp.write(json.dumps(payload_data) + '\n')
-            tmp_path = tmp.name
-
-        def _pipeline():
-            bronze_df = jsonl_to_bronze_alerts(jsonl_path=tmp_path, source_file_path="api_ingestion")
-            bronze_count = bronze_df.count()
-            silver_count = None
-            gold_count = None
-
-            if request.run_silver:
-                silver_df = bronze_to_silver_alerts()
-                silver_count = silver_df.count()
-
-            if request.run_gold and request.run_silver:
-                gold_df = silver_to_gold_alerts_scalar_only()
-                gold_count = gold_df.count()
-
-            return bronze_count, silver_count, gold_count
-
-        # FIX: dispatch blocking pipeline to thread pool
-        bronze_count, silver_count, gold_count = await run_in_executor(_pipeline)
-
-        return {
-            "status": "success",
-            "code": 201,
-            "message": "Pipeline executed successfully",
-            "bronze_count": bronze_count,
-            "silver_count": silver_count,
-            "gold_count": gold_count,
-            "alert_id": payload_data.get("alert_id"),
-            "priority": payload_data.get("priority")
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        error_msg = str(e)
-        logger.exception("json_to_hudi_pipeline error")
-
-        if "INVALID_EXTRACT_BASE_FIELD_TYPE" in error_msg or "Can't extract a value from" in error_msg:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"status": "error", "code": 400,
-                        "message": "Schema inference failed: Empty arrays detected in JSON payload"}
-            )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"status": "error", "code": 500, "message": "Pipeline execution failed"}
-        )
-
-    finally:
-        # FIX: delete temp file only AFTER the pipeline has fully returned,
-        # guaranteeing Spark has finished reading it.
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                logger.warning(f"Could not delete temp file: {tmp_path}")
 
 
 @app.post("/invalidate_schema_cache", status_code=status.HTTP_200_OK)
