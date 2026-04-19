@@ -82,32 +82,6 @@ def maybe_run_views_after_full_pipeline():
             STATE_COND.notify_all()
 
 def run_job(req):
-    # ======================================================
-    # OPTION 1: NOTEBOOK (Papermill)
-    # ======================================================
-
-    # cmd = [
-    #     "papermill",
-    #     NOTEBOOK_PATH,
-    #     OUTPUT_NOTEBOOK,
-    #     "-k", "spark",
-    #     "-p", "raw_path", req.raw_path,
-    #     "-p", "bucket", req.bucket or "",
-    #     "-p", "table", req.table or "",
-    #     "-p", "object_key", req.object_key or "",
-    # ]
-
-    # proc = subprocess.Popen(cmd)
-
-    # return {
-    #     "status": "notebook_running",
-    #     "pid": proc.pid,
-    #     "output_notebook": OUTPUT_NOTEBOOK
-    # }
-
-    # ======================================================
-    # OPTION 2: PYTHON FUNCTION
-    # ======================================================
 
     print(f"[JOB] Starting ETL for: {req.raw_path}")
 

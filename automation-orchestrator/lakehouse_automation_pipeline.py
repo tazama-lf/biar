@@ -4821,13 +4821,13 @@ def run_full_etl(
     elif table == "network_map":
         etl_network_map(spark, WAREHOUSE_ROOT, source_path=source_path)
 
-    elif table == "rules":
+    elif table == "rule":
         etl_rules(spark, WAREHOUSE_ROOT, source_path=source_path)
 
     elif table == "conditions":
         etl_conditions(spark, WAREHOUSE_ROOT, source_path=source_path)
 
-    elif table == "typologies":
+    elif table == "typology":
         etl_typologies(spark, WAREHOUSE_ROOT, source_path=source_path)
 
     elif table == "account":

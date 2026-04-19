@@ -310,28 +310,9 @@ def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = N
     return [row.asDict(recursive=True) for row in df.collect()]
 
 
-import re
 import uuid
 
-def _execute_sql_sync(sql_query: str, limit: int = None, job_group: str = None):
-    """
-    Serialised temp-view registration + SQL execution.
-    Uses a module-level lock to prevent concurrent requests from corrupting each
-    other's view registrations.
-    """
-    spark = get_spark()
-    with _sql_lock:
-        for tname, path in GOLD_PATHS.items():
-            if not os.path.exists(path):
-                logger.warning(f"Skipping missing Hudi path for table {tname}: {path}")
-                continue
-            spark.read.format("hudi").load(path).createOrReplaceTempView(tname)
-        df = spark.sql(sql_query)
-        effective_limit = limit if limit is not None else 100
-        if effective_limit > MAX_ROWS:
-            raise ValueError(f"Limit {effective_limit} exceeds MAX_ROWS {MAX_ROWS}")
-        df = df.limit(effective_limit)
-        return [row.asDict(recursive=True) for row in df.collect()]
+# REMOVED: _execute_sql_sync - /execute_sql endpoint removed for SQL injection safety
 
 
 # ============================================================
@@ -345,11 +326,6 @@ class QueryRequest(BaseModel):
     limit: Optional[int] = 100
 
 
-class SQLQueryRequest(BaseModel):
-    sql_query: str
-    limit: Optional[int] = 1000
-
-
 # ============================================================
 # API ENDPOINTS
 # ============================================================
@@ -358,9 +334,9 @@ class SQLQueryRequest(BaseModel):
 def read_root():
     return {
         "status": "online",
-        "message": "Ozone Alerts Pipeline API",
+        "message": "Lakehouse Query API (Ozone Alerts Gold)",
         "warehouse_root": WAREHOUSE_ROOT,
-        "endpoints": ["/health", "/tables", "/query", "/execute_sql"]
+        "endpoints": ["/health", "/tables", "/query", "/invalidate_schema_cache"]
     }
 
 
@@ -437,47 +413,6 @@ async def query_table(request: QueryRequest):
 
 
 # FIX: async + serialised temp-view registration
-@app.post("/execute_sql", status_code=status.HTTP_200_OK)
-async def execute_sql(request: SQLQueryRequest):
-    sql_query = request.sql_query.strip()
-
-    # Sanitise escapes from some HTTP clients
-    sql_query = re.sub(r"(\\')+(\\')+(\\')+'", "'", sql_query)
-    sql_query = re.sub(r"\\'\\'\\'", "'", sql_query)
-    sql_query = re.sub(r"\\'", "'", sql_query)
-    sql_query = re.sub(r'\s+', ' ', sql_query).strip()
-
-    forbidden_patterns = [
-        r'\bINSERT\s+INTO\b', r'\bUPDATE\s+', r'\bDELETE\s+FROM\b', r'\bDROP\s+',
-        r'\bCREATE\s+', r'\bALTER\s+', r'\bTRUNCATE\s+', r'\bMERGE\s+INTO\b', r'\bREPLACE\s+INTO\b'
-    ]
-    q_upper = sql_query.upper()
-
-    for pattern in forbidden_patterns: 
-        if re.search(pattern, q_upper):
-            raise HTTPException(
-                status_code=403,
-                detail={"status": "error", "code": 403, "message": "Only SELECT allowed"}
-            )
-
-    if not (q_upper.startswith("SELECT") or q_upper.startswith("WITH")):
-        raise HTTPException(
-            status_code=400,
-            detail={"status": "error", "code": 400, "message": "Only SELECT/WITH allowed"}
-        )
-
-    try:
-        data = await run_in_executor(_execute_sql_sync, sql_query, request.limit)
-        return {"status": "success", "code": 200, "query": sql_query, "row_count": len(data), "data": data}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("execute_sql error")
-        raise HTTPException(
-            status_code=500,
-            detail={"status": "error", "code": 500, "message": "SQL Query error", "error_details": str(e)[:120]}
-        )
-
 @app.post("/invalidate_schema_cache", status_code=status.HTTP_200_OK)
 async def invalidate_schema_cache_endpoint():
     """FIX: Manually invalidate the schema cache after a schema migration."""
