@@ -39,14 +39,13 @@ ENV JAVA_HOME=/opt/java
 ENV SPARK_HOME=/opt/spark
 ENV PATH=$SPARK_HOME/bin:$JAVA_HOME/bin:$PATH
 ENV SPARK_JARS=/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar,/opt/jars/hadoop-aws-3.3.4.jar,/opt/jars/aws-java-sdk-bundle-1.12.262.jar
-ENV ORCHESTRATOR_PORT=7619
 
 # Python deps
 RUN pip3 install --upgrade pip
 RUN pip3 install fastapi uvicorn pandas pyspark==3.4.2
 
 # Expose API port
-EXPOSE ${ORCHESTRATOR_PORT:-7619}
+EXPOSE 7619
 
 # Copy code
 COPY . .
