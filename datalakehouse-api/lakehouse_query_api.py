@@ -98,7 +98,7 @@ except Exception as e:
 # -----------------------------
 app = FastAPI(
     title="Lakehouse Pipeline API (Ozone Alerts - Bronze/Silver/Gold)",
-    description="REST API to ingest JSONL into Hudi Bronze->Silver->Gold (Scalar) and query Gold",
+    description="REST API to query Gold",
     version="2.0.0"
 )
 
@@ -350,9 +350,6 @@ class SQLQueryRequest(BaseModel):
     limit: Optional[int] = 1000
 
 
-
-
-
 # ============================================================
 # API ENDPOINTS
 # ============================================================
@@ -363,7 +360,7 @@ def read_root():
         "status": "online",
         "message": "Ozone Alerts Pipeline API",
         "warehouse_root": WAREHOUSE_ROOT,
-        "endpoints": ["/health", "/tables", "/query", "/execute_sql", "/json_to_hudi_pipeline"]
+        "endpoints": ["/health", "/tables", "/query", "/execute_sql"]
     }
 
 
@@ -480,8 +477,6 @@ async def execute_sql(request: SQLQueryRequest):
             status_code=500,
             detail={"status": "error", "code": 500, "message": "SQL Query error", "error_details": str(e)[:120]}
         )
-
-
 
 @app.post("/invalidate_schema_cache", status_code=status.HTTP_200_OK)
 async def invalidate_schema_cache_endpoint():

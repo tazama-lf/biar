@@ -55,10 +55,6 @@ RUN pip install --no-cache-dir \
 # ── Application code ──────────────────────────
 COPY *.py .
 
-# ── Warehouse mount ──────────────────────────
-RUN mkdir -p /opt/Tazama_Warehouse
-VOLUME ["/opt/Tazama_Warehouse"]
-
 # ── Ports ────────────────────────────────────
 EXPOSE 8181
 
