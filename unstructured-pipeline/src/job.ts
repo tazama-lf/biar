@@ -106,17 +106,30 @@ class DocumentProcessor {
 
       this.logger.log('Sent to solr');
 
-      await this.nifi.sendDocument({
-        documentId: docId,
-        evidenceId,
-        taskId,
-        filename: fileMeta.fileName,
-        content: extraction.text,
-        metadata: extraction.metadata,
-        extractedAt: new Date().toISOString(),
-      });
+      try {
+        await this.nifi.sendDocument({
+          documentId: docId,
+          evidenceId,
+          taskId,
+          filename: fileMeta.fileName,
+          content: extraction.text,
+          metadata: extraction.metadata,
+          extractedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        const errorMsg = (error as Error).message;
+        await this.couchdb.updateStatus(docId, 'ERROR', errorMsg);
+      }
 
-      await this.couchdb.updateStatus(docId, 'COMPLETED');
+      try {
+        await this.couchdb.updateStatus(docId, 'COMPLETED');
+      } catch (finalizeErr) {
+        this.logger.error(
+          'Failed to mark COMPLETED for ' + docId,
+          finalizeErr,
+          'process'
+        );
+      }
     } catch (error) {
       const errorMsg = (error as Error).message;
       this.logger.error('Failed ' + docId + ': ' + errorMsg, error, 'process');
