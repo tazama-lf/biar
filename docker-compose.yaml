@@ -201,7 +201,7 @@ services:
       - 7619:7619
     volumes:
       - ./automation-orchestrator/out:/app/out
-      - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Hudi_warehouse
+      - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Warehouse
     tmpfs:
       - /tmp/spark
     depends_on:
@@ -216,11 +216,11 @@ services:
     env_file:
       - .env
     environment:
-      WAREHOUSE_ROOT: /opt/Tazama_Hudi_warehouse
+      WAREHOUSE_ROOT: /opt/Tazama_Warehouse
     ports:
       - 8282:8282
     volumes:
-      - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Hudi_warehouse
+      - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Warehouse
     depends_on:
       - s3g
 
@@ -236,7 +236,7 @@ services:
       - "${JUPYTERLAB_PORT}:8888"
     volumes:
       - ./JupyterHub/notebooks:/srv/notebooks
-      - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Hudi_warehouse
+      - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Warehouse
     tmpfs:
       - /tmp/spark
     depends_on:
