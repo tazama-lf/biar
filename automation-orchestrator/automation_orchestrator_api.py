@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel
 import subprocess
 import os
@@ -72,6 +72,9 @@ def maybe_run_views_after_full_pipeline():
     try:
         spark = GLOBAL_SPARK if GLOBAL_SPARK else get_spark_session()
         run_all_views(spark, DEFAULT_WAREHOUSE_ROOT)
+    except Exception:
+        print("[VIEWS ERROR] Failed to build views")
+        traceback.print_exc()
     finally:
         with STATE_COND:
             VIEW_BUILD_IN_PROGRESS = False
@@ -169,8 +172,10 @@ for i in range(NUM_WORKERS):
 # ======================================================
 
 @app.post("/checksubmit")
-def submit(req: TriggerRequest):
-    os.makedirs(os.path.dirname(OUTPUT_REQUEST), exist_ok=True)
+def submit(
+    req: TriggerRequest,
+    x_api_key: str = Header(None, description="API Key for authentication")
+):
 
     payload = {
         "raw_path": req.raw_path,
@@ -180,22 +185,8 @@ def submit(req: TriggerRequest):
         "execute_notebook": req.execute_notebook
     }
 
-    # Read the existing requests from last_request.json
-    try:
-        if os.path.exists(OUTPUT_REQUEST):
-            with open(OUTPUT_REQUEST, "r") as f:
-                existing_requests = json.load(f)
-        else:
-            existing_requests = []
-    except json.JSONDecodeError:
-        existing_requests = []  # In case the file is empty or corrupted
-
-    # Append the new request to the list
-    existing_requests.append(payload)
-
-    # Save request metadata
-    with open(OUTPUT_REQUEST, "w") as f:
-        json.dump(existing_requests, f, indent=2)
+    with open(OUTPUT_REQUEST, "a") as f:
+        f.write(json.dumps(payload) + "\n")
 
     # Only store metadata (no execution)
     if not req.execute_notebook:

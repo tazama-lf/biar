@@ -245,391 +245,15 @@ def compute_record_hash(df, exclude_cols=None):
     )
 
 
-# ============================================================
-# 1) JSONL -> BRONZE (Hudi)
-# ============================================================
-
-def jsonl_to_bronze_alerts(jsonl_path: str, source_file_path: str = None):
-    spark = get_spark()
-
-    raw = (
-        spark.read
-             .option("multiLine", "false")
-             .option("mode", "PERMISSIVE")
-             .json(jsonl_path)
-    )
-
-    bronze_contract = {
-        "alert_id": "long",
-        "tenant_id": "string",
-        "priority": "string",
-        "priority_score": "double",
-        "alert_type": "string",
-        "prediction_outcome": "string",
-        "source": "string",
-        "txtp": "string",
-        "message": "string",
-        "alert_data": "string",
-        "transaction": "string",
-        "network_map": "string",
-        "confidence_per": "int",
-        "case_id": "long",
-        "created_at": "string",
-    }
-
-    bronze = ensure_columns(raw, bronze_contract)
-    bronze = (
-        bronze
-        .withColumn("created_at_ts", F.current_timestamp())
-        .withColumn("source_file_path", F.lit(source_file_path or jsonl_path))
-    )
-    bronze = compute_record_hash(bronze, exclude_cols=["created_at_ts"])
-    bronze = bronze.withColumn("_row_payload_json", F.to_json(F.struct(*[F.col(c) for c in bronze.columns])))
-
-    hudi_bronze_opts = {
-        "hoodie.table.name": "bronze_alerts",
-        "hoodie.datasource.write.table.type": "COPY_ON_WRITE",
-        "hoodie.datasource.write.operation": "upsert",
-        "hoodie.datasource.write.recordkey.field": "alert_id",
-        "hoodie.datasource.write.precombine.field": "created_at_ts",
-        "hoodie.datasource.write.keygenerator.class": "org.apache.hudi.keygen.NonpartitionedKeyGenerator",
-        "hoodie.datasource.write.schema.evolution.enable": "true",
-        "hoodie.datasource.read.schema.evolution.enable": "true",
-        "hoodie.datasource.write.reconcile.schema": "true",
-        "hoodie.schema.on.read.enable": "true",
-        "hoodie.index.type": "BLOOM",
-        "hoodie.metadata.enable": "false",
-    }
-
-    (
-        bronze.write.format("hudi")
-        .options(**hudi_bronze_opts)
-        .mode("append")
-        .save(alerts_bronze_path)
-    )
-
-    return bronze
 
 
-# ============================================================
-# 2) BRONZE -> SILVER (Hudi)
-# ============================================================
-
-def bronze_to_silver_alerts():
-    spark = get_spark()
-    bronze = spark.read.format("hudi").load(alerts_bronze_path)
-
-    # use cached schema inference
-    alert_schema = infer_json_schema_cached(bronze, "alert_data")
-    tx_schema    = infer_json_schema_cached(bronze, "transaction")
-    net_schema   = infer_json_schema_cached(bronze, "network_map")
-
-    b = (
-        bronze
-        .withColumn("alert_data_obj", F.from_json("alert_data", alert_schema))
-        .withColumn("transaction_obj", F.from_json("transaction", tx_schema))
-        .withColumn("network_map_obj", F.from_json("network_map", net_schema))
-        .withColumn("event_ts", F.to_timestamp(F.col("alert_data_obj.timestamp")))
-        .withColumn("event_date", F.to_date("event_ts"))
-        .withColumn("tx_created_ts", F.to_timestamp(F.col("transaction_obj.FIToFIPmtSts.GrpHdr.CreDtTm")))
-        .withColumn("tx_accept_ts",  F.to_timestamp(F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.AccptncDtTm")))
-    )
-
-    silver = (
-        b
-        .withColumn("alert_id", F.col("alert_id").cast("long"))
-        .withColumn("case_id",  F.col("case_id").cast("long"))
-        .withColumn("alert_status", F.col("alert_data_obj.status"))
-        .withColumn("evaluation_id", F.col("alert_data_obj.evaluationID"))
-        .withColumn("processing_time_dp", F.col("alert_data_obj.metaData.prcgTmDP").cast("long"))
-        .withColumn("processing_time_ed", F.col("alert_data_obj.metaData.prcgTmED").cast("long"))
-        .withColumn("tadp_id",  F.col("alert_data_obj.tadpResult.id"))
-        .withColumn("tadp_cfg", F.col("alert_data_obj.tadpResult.cfg"))
-        .withColumn("tadp_processing_time", F.col("alert_data_obj.tadpResult.prcgTm").cast("long"))
-        .withColumn("typology_count", F.size(F.col("alert_data_obj.tadpResult.typologyResult")))
-        .withColumn("typology_ids", F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> x.id)"))
-        .withColumn("typology_results", F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.result as int))"))
-        .withColumn("typology_reviews", F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.review as boolean))"))
-        .withColumn("workflow_processors", F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> x.workflow.flowProcessor)"))
-        .withColumn("alert_thresholds", F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.workflow.alertThreshold as int))"))
-        .withColumn("interdiction_thresholds", F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.workflow.interdictionThreshold as int))"))
-        .withColumn("rule_count_total", F.expr("aggregate(alert_data_obj.tadpResult.typologyResult, 0, (acc, x) -> acc + size(x.ruleResults))"))
-        .withColumn(
-            "rule_pairs",
-            F.flatten(F.expr("""
-                transform(alert_data_obj.tadpResult.typologyResult, t ->
-                  transform(t.ruleResults, r ->
-                    named_struct('rule_id', r.id, 'weight', cast(r.wght as long))))
-            """))
-        )
-        .withColumn("rule_pairs", F.expr("filter(rule_pairs, x -> x.rule_id is not null)"))
-        .withColumn("rule_pairs", F.expr("""
-            aggregate(rule_pairs, cast(array() as array<struct<rule_id:string, weight:bigint>>),
-              (acc, x) -> IF(array_contains(transform(acc, y -> y.rule_id), x.rule_id), acc, concat(acc, array(x))))
-        """))
-        .withColumn("rule_weights_json", F.to_json(F.col("rule_pairs")))
-        .withColumn("rule_id_count_distinct", F.size(F.expr("transform(rule_pairs, x -> x.rule_id)")).cast("int"))
-        .withColumn("rule_weight_sum",
-            F.expr("aggregate(transform(rule_pairs, x -> x.weight), cast(0 as long), (acc,x) -> acc + coalesce(x, cast(0 as long)))").cast("long"))
-        .withColumn("rule_weight_max",
-            F.when(F.size("rule_pairs") > 0, F.array_max(F.expr("transform(rule_pairs, x -> x.weight)"))).otherwise(F.lit(0)).cast("long"))
-        .withColumn("rule_weight_min",
-            F.when(F.size("rule_pairs") > 0, F.array_min(F.expr("transform(rule_pairs, x -> x.weight)"))).otherwise(F.lit(0)).cast("long"))
-        .withColumn("tx_type", F.col("transaction_obj.TxTp"))
-        .withColumn("tx_tenant_id", F.col("transaction_obj.TenantId"))
-        .withColumn("tx_msg_id", F.col("transaction_obj.FIToFIPmtSts.GrpHdr.MsgId"))
-        .withColumn("tx_status", F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.TxSts"))
-        .withColumn("tx_original_instr_id", F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.OrgnlInstrId"))
-        .withColumn("tx_original_e2e_id", F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.OrgnlEndToEndId"))
-        .withColumn("instg_mmb_id", F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.InstgAgt.FinInstnId.ClrSysMmbId.MmbId"))
-        .withColumn("instd_mmb_id", F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.InstdAgt.FinInstnId.ClrSysMmbId.MmbId"))
-        .withColumn("charge_count", F.size(F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf")))
-        .withColumn("charge_agent_mmb_ids", F.expr("transform(transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x.Agt.FinInstnId.ClrSysMmbId.MmbId)"))
-        .withColumn("charge_amounts", F.expr("transform(transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> cast(x.Amt.Amt as double))"))
-        .withColumn("charge_ccys", F.expr("transform(transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x.Amt.Ccy)"))
-        .withColumn("network_cfg", F.col("network_map_obj.cfg"))
-        .withColumn("network_active", F.col("network_map_obj.active").cast("boolean"))
-        .withColumn("network_tenant_id", F.col("network_map_obj.tenantId"))
-        .withColumn("network_message_count", F.size(F.col("network_map_obj.messages")))
-        .withColumn("network_message_ids", F.expr("transform(network_map_obj.messages, x -> x.id)"))
-        .select(
-            "_hoodie_commit_time","_hoodie_commit_seqno","_hoodie_record_key","_hoodie_partition_path","_hoodie_file_name",
-            "alert_id","case_id","tenant_id",
-            "priority","priority_score","alert_type","prediction_outcome","source","txtp","message","confidence_per",
-            "event_ts","event_date","tx_created_ts","tx_accept_ts","created_at","created_at_ts",
-            "alert_status","evaluation_id",
-            "processing_time_dp","processing_time_ed",
-            "tadp_id","tadp_cfg","tadp_processing_time",
-            "typology_count","typology_ids","typology_results","typology_reviews",
-            "workflow_processors","alert_thresholds","interdiction_thresholds",
-            "rule_count_total",
-            "rule_weights_json","rule_id_count_distinct","rule_weight_sum","rule_weight_max","rule_weight_min",
-            "tx_type","tx_tenant_id","tx_msg_id","tx_status","tx_original_instr_id","tx_original_e2e_id",
-            "instg_mmb_id","instd_mmb_id",
-            "charge_count","charge_agent_mmb_ids","charge_amounts","charge_ccys",
-            "network_cfg","network_active","network_tenant_id","network_message_count","network_message_ids",
-            "source_file_path","record_hash",
-            "alert_data","transaction","network_map",
-        )
-        .withColumn("_row_payload_json", F.to_json(F.struct("*")))
-    )
-
-    w = Window.partitionBy("alert_id").orderBy(F.col("created_at_ts").desc())
-    silver = silver.withColumn("rn", F.row_number().over(w)).filter("rn=1").drop("rn")
-
-    hudi_silver_opts = {
-        "hoodie.table.name": "silver_alerts",
-        "hoodie.datasource.write.table.type": "COPY_ON_WRITE",
-        "hoodie.datasource.write.operation": "upsert",
-        "hoodie.datasource.write.recordkey.field": "alert_id",
-        "hoodie.datasource.write.precombine.field": "created_at_ts",
-        "hoodie.datasource.write.keygenerator.class": "org.apache.hudi.keygen.NonpartitionedKeyGenerator",
-        "hoodie.datasource.write.schema.evolution.enable": "true",
-        "hoodie.datasource.read.schema.evolution.enable": "true",
-        "hoodie.datasource.write.reconcile.schema": "true",
-        "hoodie.schema.on.read.enable": "true",
-        "hoodie.index.type": "BLOOM",
-        "hoodie.metadata.enable": "false",
-    }
-
-    (
-        silver.write.format("hudi")
-        .options(**hudi_silver_opts)
-        .mode("append")
-        .save(alerts_silver_path)
-    )
-
-    return silver
-
-
-# ============================================================
-# 3) SILVER -> GOLD (Hudi, scalar-only)
-# ============================================================
-
-def silver_to_gold_alerts_scalar_only():
-    spark = get_spark()
-    silver = spark.read.format("hudi").load(alerts_silver_path)
-    silver = silver.drop(*[c for c in silver.columns if c.startswith("hoodie")])
-
-    w = Window.partitionBy("alert_id").orderBy(F.col("created_at_ts").desc())
-    s = silver.withColumn("rn", F.row_number().over(w)).filter("rn=1").drop("rn")
-
-    # use cached schema inference
-    alert_schema = infer_json_schema_cached(s, "alert_data")
-    g = s.withColumn("alert_data_obj", F.from_json("alert_data", alert_schema))
-
-    g = (
-        g
-        .withColumn(
-            "rule_pairs",
-            F.flatten(F.expr("""
-                transform(alert_data_obj.tadpResult.typologyResult, t ->
-                  transform(t.ruleResults, r ->
-                    named_struct('rule_id', r.id, 'weight', cast(r.wght as long))))
-            """))
-        )
-        .withColumn("rule_pairs", F.expr("filter(rule_pairs, x -> x.rule_id is not null)"))
-        .withColumn("rule_pairs", F.expr("""
-            aggregate(rule_pairs, cast(array() as array<struct<rule_id:string, weight:bigint>>),
-              (acc, x) -> IF(array_contains(transform(acc, y -> y.rule_id), x.rule_id), acc, concat(acc, array(x))))
-        """))
-        .withColumn("rule_weights", F.expr("transform(rule_pairs, x -> x.weight)"))
-    )
-
-    g = (
-        g
-        .withColumn("rule_id_count_distinct",
-            F.size(F.array_distinct(F.expr("transform(rule_pairs, x -> x.rule_id)"))).cast("int"))
-        .withColumn("rule_weight_sum",
-            F.expr("aggregate(rule_weights, cast(0 as long), (acc,x) -> acc + coalesce(x, cast(0 as long)))").cast("long"))
-        .withColumn("rule_weight_max",
-            F.when(F.size("rule_weights") > 0, F.array_max("rule_weights")).otherwise(F.lit(0)).cast("long"))
-        .withColumn("rule_weight_min",
-            F.when(F.size("rule_weights") > 0, F.array_min("rule_weights")).otherwise(F.lit(0)).cast("long"))
-        .withColumn("rule_weight_avg",
-            F.when(F.size("rule_weights") > 0,
-                   F.col("rule_weight_sum").cast("double") / F.size("rule_weights").cast("double")
-            ).otherwise(F.lit(0.0)).cast("double"))
-        .withColumn("rule_weight_p95",
-            F.when(F.size("rule_weights") > 0,
-                F.expr("""
-                    element_at(array_sort(rule_weights),
-                               cast(ceil(size(rule_weights) * 0.95) as int))
-                """).cast("double")
-            ).otherwise(F.lit(0.0)))
-        .withColumn("top_rule_id",
-            F.expr("""
-                element_at(
-                  transform(filter(rule_pairs, x -> x.weight = rule_weight_max), x -> x.rule_id),
-                  1)
-            """))
-        .withColumn("top_rule_weight", F.col("rule_weight_max").cast("long"))
-    )
-
-    g = (
-        g
-        .withColumn("tx_amount",
-            F.coalesce(
-                F.get_json_object(F.col("transaction"), "$.FIToFIPmtSts.TxInfAndSts.OrgnlTxRef.Amt.InstdAmt.Amt").cast("double"),
-                F.get_json_object(F.col("transaction"), "$.FIToFIPmtSts.TxInfAndSts.OrgnlTxRef.Amt.EqvtAmt.Amt").cast("double"),
-                F.lit(None).cast("double")
-            ))
-        .withColumn("tx_ccy",
-            F.coalesce(
-                F.get_json_object(F.col("transaction"), "$.FIToFIPmtSts.TxInfAndSts.OrgnlTxRef.Amt.InstdAmt.Ccy"),
-                F.get_json_object(F.col("transaction"), "$.FIToFIPmtSts.TxInfAndSts.OrgnlTxRef.Amt.EqvtAmt.Ccy"),
-                F.lit(None).cast("string")
-            ))
-    )
-
-    g = (
-        g
-        .withColumn("charge_total_amount",
-            F.when(F.col("charge_amounts").isNotNull(),
-                F.expr("aggregate(charge_amounts, cast(0.0 as double), (acc,x) -> acc + coalesce(x, 0.0))")
-            ).otherwise(F.lit(0.0)))
-        .withColumn("charge_currency_count",
-            F.when(F.col("charge_ccys").isNotNull(), F.size(F.array_distinct("charge_ccys"))).otherwise(F.lit(0)))
-        .withColumn("has_multi_currency_charges", (F.col("charge_currency_count") > 1).cast("int"))
-    )
-
-    g = (
-        g
-        .withColumn("total_processing_time_ms",
-            (
-                F.coalesce(F.col("processing_time_dp").cast("long"), F.lit(0)) +
-                F.coalesce(F.col("processing_time_ed").cast("long"), F.lit(0)) +
-                F.coalesce(F.col("tadp_processing_time").cast("long"), F.lit(0))
-            ).cast("long"))
-        .withColumn("event_to_ingest_ms",
-            F.when(F.col("event_ts").isNotNull(),
-                (F.col("created_at_ts").cast("long") - F.col("event_ts").cast("long")) * 1000
-            ).otherwise(F.lit(None).cast("long")))
-    )
-
-    g = (
-        g
-        .withColumn("priority_norm", F.upper("priority"))
-        .withColumn("alert_type_norm", F.upper("alert_type"))
-        .withColumn("prediction_outcome_norm", F.upper("prediction_outcome"))
-        .withColumn("security_tag", F.concat(F.lit("TENANT:"), F.col("tenant_id")))
-    )
-
-    gold = g.select(
-        "alert_id","case_id","tenant_id",
-        "priority_norm","priority_score",
-        "alert_type_norm","prediction_outcome_norm",
-        "source","txtp",
-        "event_ts","created_at_ts","event_date",
-        "alert_status","evaluation_id",
-        "tx_type","tx_msg_id","tx_status","tx_amount","tx_ccy",
-        "typology_count","rule_count_total",
-        "rule_id_count_distinct","rule_weight_sum","rule_weight_max","rule_weight_min","rule_weight_avg","rule_weight_p95",
-        "top_rule_id","top_rule_weight",
-        "charge_count","charge_total_amount","charge_currency_count","has_multi_currency_charges",
-        "network_message_count",
-        "event_to_ingest_ms","total_processing_time_ms",
-        "security_tag","source_file_path","record_hash"
-    )
-
-    bad = [c for c, t in gold.dtypes if t.startswith("array") or t.startswith("struct")]
-    if bad:
-        raise RuntimeError(f"Gold still contains non-scalar columns: {bad}")
-
-    hudi_gold_opts = {
-        "hoodie.table.name": "alerts",
-        "hoodie.datasource.write.table.type": "COPY_ON_WRITE",
-        "hoodie.datasource.write.operation": "upsert",
-        "hoodie.datasource.write.recordkey.field": "alert_id",
-        "hoodie.datasource.write.precombine.field": "created_at_ts",
-        "hoodie.datasource.write.partitionpath.field": "event_date",
-        "hoodie.datasource.write.keygenerator.class": "org.apache.hudi.keygen.SimpleKeyGenerator",
-        "hoodie.datasource.write.hive_style_partitioning": "true",
-        "hoodie.datasource.write.schema.evolution.enable": "true",
-        "hoodie.datasource.read.schema.evolution.enable": "true",
-        "hoodie.datasource.write.reconcile.schema": "true",
-        "hoodie.schema.on.read.enable": "true",
-        "hoodie.datasource.write.payload.class": "org.apache.hudi.common.model.OverwriteWithLatestAvroPayload",
-        "hoodie.metadata.enable": "false",
-    }
-
-    (
-        gold.write.format("hudi")
-        .options(**hudi_gold_opts)
-        .mode("append")
-        .save(alerts_gold_path)
-    )
-
-    return gold
-
-
-# ============================================================
-# Orchestrator
-# ============================================================
-
-def _run_alerts_pipeline_sync(jsonl_path: str):
-    """Synchronous pipeline — called from thread pool by the async endpoint."""
-    logger.info("Step 1/3: JSONL -> Bronze")
-    bronze_df = jsonl_to_bronze_alerts(jsonl_path=jsonl_path, source_file_path=f"file://{jsonl_path}")
-    bronze_count = bronze_df.count()
-    logger.info(f"  Bronze rows: {bronze_count}")
-
-    logger.info("Step 2/3: Bronze -> Silver")
-    silver_df = bronze_to_silver_alerts()
-    silver_count = silver_df.count()
-    logger.info(f"  Silver rows: {silver_count}")
-
-    logger.info("Step 3/3: Silver -> Gold (scalar-only)")
-    gold_df = silver_to_gold_alerts_scalar_only()
-    gold_count = gold_df.count()
-    logger.info(f"  Gold rows: {gold_count}")
-
-    return bronze_count, silver_count, gold_count
 
 
 # ============================================================
 # Helper: Query Hudi data (Gold registry)
 # ============================================================
+
+MAX_ROWS = 10000
 
 def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = None, limit: int = None):
     """Synchronous query — called from thread pool."""
@@ -641,23 +265,35 @@ def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = N
     df = spark.read.format("hudi").load(path)
     valid_columns = set(df.columns)
 
+    # Validate filters
+    if filters:
+        invalid_filters = [k for k in filters if k not in valid_columns]
+        if invalid_filters:
+            raise ValueError(f"Invalid filter keys: {', '.join(invalid_filters)}")
+
+    # Validate columns
+    if columns:
+        invalid_columns = [c for c in columns if c not in valid_columns]
+        if invalid_columns:
+            raise ValueError(f"Invalid columns: {', '.join(invalid_columns)}")
+
+    # Apply filters
     if filters:
         for col_name, value in filters.items():
-            if col_name not in valid_columns or value is None:
-                continue
             if isinstance(value, list):
-                if value:
-                    df = df.filter(F.col(col_name).isin(value))
+                df = df.filter(F.col(col_name).isin(value))
             else:
                 df = df.filter(F.col(col_name) == value)
 
+    # Apply columns selection
     if columns:
-        valid_select_cols = [c for c in columns if c in valid_columns]
-        if valid_select_cols:
-            df = df.select(*valid_select_cols)
+        df = df.select(*columns)
 
-    if limit:
-        df = df.limit(limit)
+    # Enforce limit
+    effective_limit = limit if limit is not None else 100
+    if effective_limit > MAX_ROWS:
+        raise ValueError(f"Limit {effective_limit} exceeds MAX_ROWS {MAX_ROWS}")
+    df = df.limit(effective_limit)
 
     return [row.asDict(recursive=True) for row in df.collect()]
 
@@ -675,8 +311,10 @@ def _execute_sql_sync(sql_query: str, limit: int = None):
         for tname, path in GOLD_PATHS.items():
             spark.read.format("hudi").load(path).createOrReplaceTempView(tname)
         df = spark.sql(sql_query)
-        if limit:
-            df = df.limit(limit)
+        effective_limit = limit if limit is not None else 100
+        if effective_limit > MAX_ROWS:
+            raise ValueError(f"Limit {effective_limit} exceeds MAX_ROWS {MAX_ROWS}")
+        df = df.limit(effective_limit)
         return [row.asDict(recursive=True) for row in df.collect()]
 
 
@@ -696,17 +334,7 @@ class SQLQueryRequest(BaseModel):
     limit: Optional[int] = 1000
 
 
-class JSONLPathRequest(BaseModel):
-    jsonl_path: str
-    run_silver: bool = True
-    run_gold: bool = True
 
-
-class JSONToHudiRequest(BaseModel):
-    payload: str
-    table_name: str
-    run_silver: bool = True
-    run_gold: bool = True
 
 
 # ============================================================
@@ -839,8 +467,7 @@ async def execute_sql(request: SQLQueryRequest):
 
 
 # FIX: async, thread-pool dispatch, safe temp-file handling
-@app.post("/json_to_hudi_pipeline", status_code=status.HTTP_201_CREATED)
-async def json_to_hudi_pipeline(request: JSONToHudiRequest):
+
     # Parse JSON eagerly in the async thread so we fail fast before touching Spark
     try:
         payload_data = json.loads(request.payload)
