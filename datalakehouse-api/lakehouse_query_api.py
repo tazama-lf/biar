@@ -322,6 +322,9 @@ def _execute_sql_sync(sql_query: str, limit: int = None, job_group: str = None):
     spark = get_spark()
     with _sql_lock:
         for tname, path in GOLD_PATHS.items():
+            if not os.path.exists(path):
+                logger.warning(f"Skipping missing Hudi path for table {tname}: {path}")
+                continue
             spark.read.format("hudi").load(path).createOrReplaceTempView(tname)
         df = spark.sql(sql_query)
         effective_limit = limit if limit is not None else 100
