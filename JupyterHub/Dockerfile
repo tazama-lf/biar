@@ -30,11 +30,11 @@ RUN mkdir -p /opt /opt/jars && \
     rm -f /tmp/spark.tgz
 
 RUN curl -fsSL "https://repo1.maven.org/maven2/org/apache/hudi/hudi-spark3.4-bundle_2.12/${HUDI_BUNDLE_VERSION}/hudi-spark3.4-bundle_2.12-${HUDI_BUNDLE_VERSION}.jar" \
-        -o /opt/jars/hudi-spark3.4-bundle_2.12-${HUDI_BUNDLE_VERSION}.jar && \
+    -o /opt/jars/hudi-spark3.4-bundle_2.12-${HUDI_BUNDLE_VERSION}.jar && \
     curl -fsSL "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar" \
-        -o /opt/jars/hadoop-aws-${HADOOP_AWS_VERSION}.jar && \
+    -o /opt/jars/hadoop-aws-${HADOOP_AWS_VERSION}.jar && \
     curl -fsSL "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/${AWS_SDK_BUNDLE_VERSION}/aws-java-sdk-bundle-${AWS_SDK_BUNDLE_VERSION}.jar" \
-        -o /opt/jars/aws-java-sdk-bundle-${AWS_SDK_BUNDLE_VERSION}.jar
+    -o /opt/jars/aws-java-sdk-bundle-${AWS_SDK_BUNDLE_VERSION}.jar
 
 ENV JAVA_HOME=/opt/java
 ENV SPARK_HOME=/opt/spark
@@ -43,15 +43,9 @@ ENV SPARK_JARS=/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar,/opt/jars/hadoop-a
 ENV PYSPARK_PYTHON=python3
 
 # Python deps — JupyterLab + PySpark + data/viz libraries
+COPY requirements.txt .
 RUN pip3 install --upgrade pip && \
-    pip3 install --no-cache-dir \
-    jupyterlab \
-    pyspark==3.4.2 \
-    pandas \
-    numpy \
-    plotly \
-    ipywidgets \
-    findspark
+    pip3 install --no-cache-dir -r requirements.txt
 
 RUN mkdir -p /srv/notebooks
 

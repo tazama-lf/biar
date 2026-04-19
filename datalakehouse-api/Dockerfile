@@ -37,12 +37,9 @@ RUN mkdir -p /opt/jars && \
     curl -fL# "https://repo1.maven.org/maven2/org/apache/hudi/hudi-spark3.4-bundle_2.12/${HUDI_BUNDLE_VERSION}/hudi-spark3.4-bundle_2.12-${HUDI_BUNDLE_VERSION}.jar" \
     -o /opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar
 
-RUN pip install --no-cache-dir \
-    fastapi \
-    "uvicorn[standard]" \
-    pyspark==3.4.2 \
-    findspark \
-    pydantic
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY *.py .
 

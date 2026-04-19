@@ -1,0 +1,7 @@
+jupyterlab
+pyspark==3.4.2
+pandas
+numpy
+plotly
+ipywidgets
+findspark

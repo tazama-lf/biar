@@ -40,12 +40,9 @@ ENV PATH=$SPARK_HOME/bin:$JAVA_HOME/bin:$PATH
 ENV SPARK_JARS=/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar,/opt/jars/hadoop-aws-3.3.4.jar,/opt/jars/aws-java-sdk-bundle-1.12.262.jar
 
 # Python deps
+COPY requirements.txt .
 RUN pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir \
-        fastapi \
-        uvicorn \
-        pandas \
-        pyspark==3.4.2
+    pip3 install --no-cache-dir -r requirements.txt
 
 EXPOSE 7619
 
