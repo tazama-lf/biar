@@ -120,7 +120,13 @@ class DocumentProcessor {
     } catch (error) {
       const errorMsg = (error as Error).message;
       this.logger.error('Failed ' + docId + ': ' + errorMsg, error, 'process');
-      await this.couchdb.updateStatus(docId, 'ERROR', errorMsg);
+
+      try {
+        await this.couchdb.updateStatus(docId, 'ERROR', errorMsg);
+      } catch (updateErr) {
+        this.logger.error('Failed to mark ERROR status for ' + docId, updateErr, 'process');
+      }
+
     }
   }
 }
