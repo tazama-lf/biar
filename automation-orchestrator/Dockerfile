@@ -10,8 +10,7 @@ RUN apt-get update && apt-get install -y \
     tar \
     && rm -rf /var/lib/apt/lists/*
 
-# Java 11 (Temurin) - Debian bookworm does not ship OpenJDK 11 packages by default.
-# Using a pinned release URL for reproducible builds.
+
 ARG TEMURIN_11_TAG=jdk-11.0.30+7
 ARG TEMURIN_11_TGZ=OpenJDK11U-jdk_x64_linux_hotspot_11.0.30_7.tar.gz
 RUN mkdir -p /opt/java && \
@@ -41,17 +40,16 @@ ENV PATH=$SPARK_HOME/bin:$JAVA_HOME/bin:$PATH
 ENV SPARK_JARS=/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar,/opt/jars/hadoop-aws-3.3.4.jar,/opt/jars/aws-java-sdk-bundle-1.12.262.jar
 
 # Python deps
-RUN pip3 install --upgrade pip
-RUN pip3 install fastapi uvicorn pandas pyspark==3.4.2
+RUN pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir \
+        fastapi \
+        uvicorn \
+        pandas \
+        pyspark==3.4.2
 
-# Expose API port
 EXPOSE 7619
 
-# Copy code
 COPY . .
-
-# # Permissions (optional)
-# RUN chmod -R 077 /app
 
 # Run FastAPI
 CMD ["uvicorn", "automation_orchestrator_api:app", "--host", "0.0.0.0", "--port", "7619", "--log-level", "info"]

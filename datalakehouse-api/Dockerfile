@@ -1,16 +1,12 @@
-# ─────────────────────────────────────────────
-# Stage: runtime
-# ─────────────────────────────────────────────
 FROM python:3.9-slim-bookworm
 
-# ── System deps ──────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     procps \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Java 11 (Temurin - preferred for Spark/Hudi) ──
+
 ARG TEMURIN_11_TAG=jdk-11.0.30+7
 ARG TEMURIN_11_TGZ=OpenJDK11U-jdk_x64_linux_hotspot_11.0.30_7.tar.gz
 
@@ -19,7 +15,6 @@ RUN mkdir -p /opt/java && \
     tar -xzf /tmp/temurin11.tgz -C /opt/java --strip-components=1 && \
     rm -f /tmp/temurin11.tgz
 
-# ── ENV ──────────────────────────────────────
 ENV JAVA_HOME=/opt/java
 ENV PATH=$JAVA_HOME/bin:$PATH
 
@@ -32,19 +27,16 @@ ENV SPARK_JARS=/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar
 
 WORKDIR /app
 
-# ── Spark ────────────────────────────────────
 RUN mkdir -p /opt && \
     curl -fL# "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}.tgz" -o /tmp/spark.tgz && \
     tar -xzf /tmp/spark.tgz -C /opt && \
     mv "/opt/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}" /opt/spark && \
     rm -f /tmp/spark.tgz
 
-# ── Hudi ─────────────────────────────────────
 RUN mkdir -p /opt/jars && \
     curl -fL# "https://repo1.maven.org/maven2/org/apache/hudi/hudi-spark3.4-bundle_2.12/${HUDI_BUNDLE_VERSION}/hudi-spark3.4-bundle_2.12-${HUDI_BUNDLE_VERSION}.jar" \
     -o /opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar
 
-# ── Python dependencies (DIRECT install) ─────
 RUN pip install --no-cache-dir \
     fastapi \
     "uvicorn[standard]" \
@@ -52,11 +44,8 @@ RUN pip install --no-cache-dir \
     findspark \
     pydantic
 
-# ── Application code ──────────────────────────
 COPY *.py .
 
-# ── Ports ────────────────────────────────────
 EXPOSE 8181
 
-# ── Start both APIs ──────────────────────────
 CMD ["sh", "-c", "python lakehouse_query_api.py"]
