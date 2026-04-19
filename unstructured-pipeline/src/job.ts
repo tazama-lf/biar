@@ -57,7 +57,9 @@ class DocumentProcessor {
     try {
       await this.couchdb.updateStatus(docId, 'PROCESSING');
 
-      const attachmentNames = doc._attachments ? Object.keys(doc._attachments) : [];
+      const attachmentNames = doc._attachments
+        ? Object.keys(doc._attachments)
+        : [];
       if (attachmentNames.length === 0) {
         throw new Error('No attachments found');
       }
@@ -137,9 +139,12 @@ class DocumentProcessor {
       try {
         await this.couchdb.updateStatus(docId, 'ERROR', errorMsg);
       } catch (updateErr) {
-        this.logger.error('Failed to mark ERROR status for ' + docId, updateErr, 'process');
+        this.logger.error(
+          'Failed to mark ERROR status for ' + docId,
+          updateErr,
+          'process'
+        );
       }
-
     }
   }
 }
@@ -148,8 +153,7 @@ const startProcessor = (): void => {
   const processor = new DocumentProcessor();
   const cfg = (processor as unknown as { config: Configuration }).config;
   const cronEnabled = cfg.CRON_ENABLED;
-  const cronSchedule = cfg.CRON_SCHEDULE ?? '*/5 * * * *';
-
+  const cronSchedule = cfg.CRON_SCHEDULE;
 
   let running = false;
 
