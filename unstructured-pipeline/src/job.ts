@@ -73,8 +73,8 @@ class DocumentProcessor {
       if (fileMeta.fileSize > this.config.MAX_FILE_SIZE_MB * BYTES_PER_MB) {
         throw new Error(
           'File too large: ' +
-          Math.round(fileMeta.fileSize / BYTES_PER_MB) +
-          'MB'
+            Math.round(fileMeta.fileSize / BYTES_PER_MB) +
+            'MB'
         );
       }
 

@@ -33,13 +33,13 @@ jest.mock('@tazama-lf/frms-coe-lib', () => {
 });
 
 jest.mock('@tazama-lf/frms-coe-lib/lib/config', () => ({
-  validateProcessorConfig: jest.fn(() => ({
+  validateProcessorConfig: jest.fn((_additionalEnvVars) => ({
     COUCHDB_URL: 'http://localhost:5984/cms-evidence',
     TIKA_URL: 'http://localhost:9998',
     SOLR_URL: 'http://localhost:8983/solr/biar_docs',
     NIFI_URL: 'http://localhost:8081',
-    CRON_ENABLED: false,
-    CRON_SCHEDULE: '*/5 * * * *',
+    CRON_ENABLED: process.env.CRON_ENABLED === 'true',
+    CRON_SCHEDULE: process.env.CRON_SCHEDULE || '*/5 * * * *',
     MAX_FILE_SIZE_MB: 50,
     MAX_SOLR_CONTENT: 30000,
     TIKA_TIMEOUT: 120000,
@@ -108,7 +108,20 @@ describe('DocumentProcessor', () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
-    (validateProcessorConfig as jest.Mock).mockReturnValue(mockConfig);
+    (validateProcessorConfig as jest.Mock).mockImplementation(
+      (_additionalEnvVars) => ({
+        COUCHDB_URL: 'http://localhost:5984/cms-evidence',
+        TIKA_URL: 'http://localhost:9998',
+        SOLR_URL: 'http://localhost:8983/solr/biar_docs',
+        NIFI_URL: 'http://localhost:8081',
+        CRON_ENABLED: process.env.CRON_ENABLED === 'true',
+        CRON_SCHEDULE: process.env.CRON_SCHEDULE || mockConfig.CRON_SCHEDULE,
+        MAX_FILE_SIZE_MB: 50,
+        MAX_SOLR_CONTENT: 30000,
+        TIKA_TIMEOUT: 120000,
+        NIFI_TIMEOUT: 120000,
+      })
+    );
     (CouchDBService.getInstance as jest.Mock).mockReturnValue(mockCouchDB);
     (TikaService.getInstance as jest.Mock).mockReturnValue(mockTika);
     (SolrService.getInstance as jest.Mock).mockReturnValue(mockSolr);
