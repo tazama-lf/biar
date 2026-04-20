@@ -17,17 +17,11 @@ import tempfile
 import json
 import time
 import logging
-
-# NOTE: nest_asyncio REMOVED — it is incompatible with uvicorn's production event loop
-# and can cause deadlocks under concurrent load. All blocking Spark calls are now
-# dispatched to a thread-pool executor instead.
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pipeline")
 
-# -----------------------------
-# Spark init  (with recovery)
-# -----------------------------
 project_path = os.getcwd()
 spark_path = os.getenv("SPARK_HOME", f"{project_path}/spark-3.4.2-bin-hadoop3")
 os.environ["SPARK_HOME"] = spark_path
@@ -37,23 +31,20 @@ findspark.init(spark_path)
 _spark_lock = threading.Lock()
 _spark: Optional[SparkSession] = None
 
-
 def _build_spark() -> SparkSession:
     spark_jars = os.getenv("SPARK_JARS", "").strip()
     builder = (
         SparkSession.builder
         .appName("ozone-alerts-pipeline")
-        .master("local[*]")
+        .master("local[1]")
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-        .config("spark.driver.memory", "4g")
-        .config("spark.executor.memory", "4g")
-        .config("spark.sql.shuffle.partitions", "8")
-        .config("spark.default.parallelism", "8")
-        #job-level timeout so a runaway query never hangs forever
+        .config("spark.driver.memory", "1g")
+        .config("spark.executor.memory", "1g")
+        .config("spark.sql.shuffle.partitions", "4")
+        .config("spark.default.parallelism", "4")
         .config("spark.network.timeout", "300s")
         .config("spark.executor.heartbeatInterval", "60s")
     )
-
     if spark_jars:
         builder = (
             builder
@@ -61,15 +52,9 @@ def _build_spark() -> SparkSession:
             .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.hudi.catalog.HoodieCatalog")
             .config("spark.jars", spark_jars)
         )
-
     return builder.getOrCreate()
 
-
 def get_spark() -> SparkSession:
-    """
-    Return the global Spark session, recreating it if the driver has died.
-    Thread-safe via a module-level lock.
-    """
     global _spark
     with _spark_lock:
         if _spark is None or _spark._sc._jvm is None:
@@ -85,29 +70,19 @@ def get_spark() -> SparkSession:
                 raise RuntimeError(f"Spark session unavailable: {exc}") from exc
         return _spark
 
-
-# Warm up Spark at import time so the first API call is not slow.
 try:
     get_spark()
 except Exception as e:
     logger.error(f"Spark warm-up failed at startup: {e}")
 
-
-# -----------------------------
-# FastAPI
-# -----------------------------
 app = FastAPI(
     title="Lakehouse Pipeline API (Ozone Alerts - Bronze/Silver/Gold)",
     description="REST API to query Gold",
     version="2.0.0"
 )
 
-# Thread pool for all blocking Spark calls so the async event loop is never stalled
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="spark-worker")
-
-# Request timeout (seconds)
 SPARK_JOB_TIMEOUT = 120
-
 
 async def run_in_executor(fn, *args, timeout: float = SPARK_JOB_TIMEOUT, job_group: str = None):
     """Run a blocking function in the thread pool with an optional timeout and Spark job group cancellation."""
@@ -119,11 +94,8 @@ async def run_in_executor(fn, *args, timeout: float = SPARK_JOB_TIMEOUT, job_gro
     def wrapped_fn(*args):
         with _spark_lock:
             spark.sparkContext.setJobGroup(job_group, f"Spark job for {fn.__name__}", interruptOnCancel=True)
-        try:
-            return fn(*args, job_group=job_group)
-        finally:
-            with _spark_lock:
-                spark.sparkContext.clearJobGroup()
+        return fn(*args, job_group=job_group)
+    # NOTE: clearJobGroup not available in PySpark SparkContext; group auto-cleared or overwritten by next setJobGroup
 
     loop = asyncio.get_event_loop()
     future = loop.run_in_executor(_executor, wrapped_fn, *args)
@@ -139,7 +111,7 @@ async def run_in_executor(fn, *args, timeout: float = SPARK_JOB_TIMEOUT, job_gro
                     "message": f"Spark job {job_group} exceeded timeout of {timeout}s"}
         )
 
-# Custom exception handler for validation errors
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     errors = []
@@ -311,9 +283,80 @@ def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = N
 
 
 import uuid
+import re
 
-# REMOVED: _execute_sql_sync - /execute_sql endpoint removed for SQL injection safety
+async def run_in_executor(fn, *args, timeout: float = SPARK_JOB_TIMEOUT):
+    """Run a blocking function in the thread pool with an optional timeout."""
+    loop = asyncio.get_event_loop()
+    future = loop.run_in_executor(_executor, fn, *args)
+    try:
+        return await asyncio.wait_for(future, timeout=timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={"status": "error", "code": 504,
+                    "message": f"Spark job exceeded timeout of {timeout}s"}
+        )
 
+
+
+def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = None, limit: int = None):
+    """Synchronous query — called from thread pool."""
+    if table_name not in GOLD_PATHS:
+        raise ValueError(f"Table '{table_name}' not found in Gold registry")
+
+    spark = get_spark()
+    path = GOLD_PATHS[table_name]
+    df = spark.read.format("hudi").load(path)
+    valid_columns = set(df.columns)
+
+    if filters:
+        for col_name, value in filters.items():
+            if col_name not in valid_columns or value is None:
+                continue
+            if isinstance(value, list):
+                if value:
+                    df = df.filter(F.col(col_name).isin(value))
+            else:
+                df = df.filter(F.col(col_name) == value)
+
+    if columns:
+        valid_select_cols = [c for c in columns if c in valid_columns]
+        if valid_select_cols:
+            df = df.select(*valid_select_cols)
+
+    if limit:
+        df = df.limit(limit)
+
+    return [row.asDict(recursive=True) for row in df.collect()]
+
+
+import re
+
+def _execute_sql_sync(sql_query: str, limit: int = None):
+    """
+    Serialised temp-view registration + SQL execution.
+    Uses a module-level lock to prevent concurrent requests from corrupting each
+    other's view registrations.
+    """
+    spark = get_spark()
+    with _sql_lock:
+        for tname, path in GOLD_PATHS.items():
+            # Check if the table path exists before loading
+            if os.path.isdir(path):
+                spark.read.format("hudi").load(path).createOrReplaceTempView(tname)
+            else:
+                # Log warning if the table path is missing
+                logger.warning(f"Path for table '{tname}' not found: {path}")
+        
+        # Now execute the SQL query
+        df = spark.sql(sql_query)
+        
+        if limit:
+            df = df.limit(limit)
+        
+        # Collect results as dictionaries
+        return [row.asDict(recursive=True) for row in df.collect()]
 
 # ============================================================
 # Request Models
@@ -326,6 +369,66 @@ class QueryRequest(BaseModel):
     limit: Optional[int] = 100
 
 
+class SQLQueryRequest(BaseModel):
+    sql_query: str
+    limit: Optional[int] = 1000
+@app.post("/execute_sql", status_code=status.HTTP_200_OK)
+async def execute_sql(request: SQLQueryRequest):
+    sql_query = request.sql_query.strip()
+
+    # Sanitise escapes from some HTTP clients
+    sql_query = re.sub(r"(\\')+(\\')+(\\')+'", "'", sql_query)
+    sql_query = re.sub(r"\\'\\'\\'", "'", sql_query)
+    sql_query = re.sub(r"\\'", "'", sql_query)
+    sql_query = re.sub(r'\s+', ' ', sql_query).strip()
+
+    forbidden_patterns = [
+        r'\bINSERT\s+INTO\b', r'\bUPDATE\s+', r'\bDELETE\s+FROM\b', r'\bDROP\s+',
+        r'\bCREATE\s+', r'\bALTER\s+', r'\bTRUNCATE\s+', r'\bMERGE\s+INTO\b', r'\bREPLACE\s+INTO\b'
+    ]
+    q_upper = sql_query.upper()
+
+    for pattern in forbidden_patterns:
+        if re.search(pattern, q_upper):
+            raise HTTPException(
+                status_code=403,
+                detail={"status": "error", "code": 403, "message": "Only SELECT allowed"}
+            )
+
+    if not (q_upper.startswith("SELECT") or q_upper.startswith("WITH")):
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "code": 400, "message": "Only SELECT/WITH allowed"}
+        )
+
+    try:
+        data = await run_in_executor(_execute_sql_sync, sql_query, request.limit)
+        return {"status": "success", "code": 200, "query": sql_query, "row_count": len(data), "data": data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("execute_sql error")
+        raise HTTPException(
+            status_code=500,
+            detail={"status": "error", "code": 500, "message": "SQL Query error", "error_details": str(e)[:120]}
+        )
+
+# ============================================================
+# Request Models
+# ============================================================
+
+class QueryRequest(BaseModel):
+    table_name: str
+    filters: Optional[Dict[str, Union[str, int, float, List[str], List[int], List[float]]]] = None
+    columns: Optional[List[str]] = None
+    limit: Optional[int] = 100
+
+class SQLQueryRequest(BaseModel):
+    sql_query: str
+    limit: Optional[int] = 1000
+
+
+
 # ============================================================
 # API ENDPOINTS
 # ============================================================
@@ -336,7 +439,7 @@ def read_root():
         "status": "online",
         "message": "Lakehouse Query API (Ozone Alerts Gold)",
         "warehouse_root": WAREHOUSE_ROOT,
-        "endpoints": ["/health", "/tables", "/query", "/invalidate_schema_cache"]
+    "endpoints": ["/health", "/tables", "/query", "/execute_sql", "/invalidate_schema_cache"]
     }
 
 
@@ -420,6 +523,56 @@ async def invalidate_schema_cache_endpoint():
     return {"status": "success", "message": "Schema cache invalidated"}
 
 
+@app.post("/execute_sql", status_code=status.HTTP_200_OK)
+async def execute_sql(request: SQLQueryRequest):
+    spark = get_spark()  
+    sql_query = request.sql_query.strip()
+
+    # Sanitise escapes from some HTTP clients
+    sql_query = re.sub(r"(\\')+(\\')+(\\')+'", "'", sql_query)
+    sql_query = re.sub(r"\\'\\'\\'", "'", sql_query)
+    sql_query = re.sub(r"\\'", "'", sql_query)
+    sql_query = re.sub(r'\s+', ' ', sql_query).strip()
+
+    forbidden_patterns = [
+        r'\bINSERT\s+INTO\b', r'\bUPDATE\s+', r'\bDELETE\s+FROM\b', r'\bDROP\s+',
+        r'\bCREATE\s+', r'\bALTER\s+', r'\bTRUNCATE\s+', r'\bMERGE\s+INTO\b', r'\bREPLACE\s+INTO\b'
+    ]
+    q_upper = sql_query.upper()
+
+    for pattern in forbidden_patterns:
+        if re.search(pattern, q_upper):
+            raise HTTPException(
+                status_code=403,
+                detail={"status": "error", "code": 403, "message": "Only SELECT allowed"}
+            )
+
+    if not (q_upper.startswith("SELECT") or q_upper.startswith("WITH")):
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "code": 400, "message": "Only SELECT/WITH allowed"}
+        )
+
+    try:
+        # Debugging: Ensure pacs008 exists and can be loaded
+        if os.path.isdir("/opt/Tazama_Warehouse/gold/pacs008"):
+            print("pacs008 exists, loading it...")
+            spark.read.format("hudi").load("/opt/Tazama_Warehouse/gold/pacs008").createOrReplaceTempView("pacs008")
+        else:
+            print("pacs008 path does not exist")
+
+        # Execute the SQL query
+        data = await run_in_executor(_execute_sql_sync, sql_query, request.limit)
+        return {"status": "success", "code": 200, "query": sql_query, "row_count": len(data), "data": data}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("execute_sql error")
+        raise HTTPException(
+            status_code=500,
+            detail={"status": "error", "code": 500, "message": "SQL Query error", "error_details": str(e)[:120]}
+        )
 # ============================================================
 # Run server
 # ============================================================

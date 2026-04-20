@@ -278,7 +278,21 @@ services:
     volumes:
       - ./nifi:/nifi:ro
     entrypoint: ["/bin/sh", "/nifi/init.sh"]
-
+  
+  # unstructured-pipeline:
+  #   build:
+  #     context: ./unstructured-pipeline
+  #     dockerfile: Dockerfile
+  #   container_name: biar-unstructured-pipeline
+  #   restart: unless-stopped
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     TIKA_SERVER_URL: http://tika:${TIKA_PORT}/tika
+  #     SOLR_URL: http://solr:${SOLR_PORT}/solr/biar_docs
+  #   depends_on:
+  #     - tika
+  #     - solr
 
 volumes:
   solr_data:

@@ -26,7 +26,7 @@ def get_spark_session():
     spark_home = _env("SPARK_HOME", "/opt/spark")
     os.environ["SPARK_HOME"] = spark_home
 
-    spark_master = _env("SPARK_MASTER", "local[*]")
+    spark_master = _env("SPARK_MASTER", "local[1]")
     spark_local_dir = _env("SPARK_LOCAL_DIR", "/tmp/spark")
     # Also set the env var Spark honors for local scratch.
     os.environ.setdefault("SPARK_LOCAL_DIRS", spark_local_dir)
@@ -67,13 +67,15 @@ def get_spark_session():
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.hudi.catalog.HoodieCatalog")
         # Memory & performance
         .config("spark.local.dir", spark_local_dir)
-        .config("spark.driver.memory", "10g")
-        .config("spark.driver.memoryOverhead", "2g")
-        .config("spark.driver.maxResultSize", "4g")
-        .config("spark.executor.memory", "10g")
-        .config("spark.executor.memoryOverhead", "2g")
+        .config("spark.driver.memory", "2g")
+        .config("spark.driver.memoryOverhead", "1g")
+        .config("spark.driver.maxResultSize", "1g")
+        .config("spark.executor.memory", "2g")
+        .config("spark.executor.memoryOverhead", "1g")
         .config("spark.sql.shuffle.partitions", "16")
         .config("spark.default.parallelism", "16")
+        .config("spark.executor.cores", "2")  # Limit to 2 cores per executor
+        .config("spark.driver.cores", "2")    # Limit to 2 cores for the driver
         .config("spark.memory.fraction", "0.8")
         .config("spark.memory.storageFraction", "0.2")
         .config("spark.sql.adaptive.enabled", "true")
@@ -82,7 +84,7 @@ def get_spark_session():
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY")
         .config("spark.sql.session.timeZone", "UTC")
         .getOrCreate()
-    )
+        )
     spark.sparkContext.setLogLevel("WARN")
     print(f"Spark Version: {spark.version}")
     return spark
@@ -2171,7 +2173,10 @@ def etl_typologies(spark, WAREHOUSE_ROOT: str, source_path: str) -> str:
         # top-level useful fields
         .withColumn("typology_id_in_json", F.col("typology_obj.id"))
         .withColumn("typology_cfg_in_json", F.col("typology_obj.cfg"))
-        .withColumn("typology_desc", F.col("typology_obj.desc"))
+        .withColumn(
+            "typology_desc",
+            F.when(F.col("typology_obj").getField("desc").isNotNull(), F.col("typology_obj").getField("desc")).otherwise(F.lit(None))
+        )
         .withColumn("typology_name", F.col("typology_obj.typology_name"))
 
         # workflow
@@ -2471,10 +2476,7 @@ def etl_account_holder(spark, WAREHOUSE_ROOT: str, source_path: str) -> str:
     return gold_path    
 
 def etl_rules(spark, WAREHOUSE_ROOT: str, source_path: str) -> str:
-    """
-    Complete Rules ETL pipeline.
-    source_path example: "s3a://frms1/rule/"
-    """
+    
     bronze_path = f"{WAREHOUSE_ROOT}/bronze/rules"
     silver_path = f"{WAREHOUSE_ROOT}/silver/rules"
     gold_path   = f"{WAREHOUSE_ROOT}/gold/rules"
@@ -2544,7 +2546,13 @@ def etl_rules(spark, WAREHOUSE_ROOT: str, source_path: str) -> str:
         .withColumn("tenant_id_in_json", F.col("rule_obj.tenantId").cast("string"))
         .withColumn("band_count", F.coalesce(F.size(F.col("config_obj.bands")), F.lit(0)).cast("int"))
         .withColumn("exit_condition_count", F.coalesce(F.size(F.col("config_obj.exitConditions")), F.lit(0)).cast("int"))
-        .withColumn("evaluation_interval_time_ms", F.col("config_obj.parameters.evaluationIntervalTime").cast("long"))
+        .withColumn(
+            "evaluation_interval_time_ms",
+            F.when(
+                F.col("config_obj.parameters").isNotNull() & F.col("config_obj.parameters").getField("evaluationIntervalTime").isNotNull(),
+                F.col("config_obj.parameters").getField("evaluationIntervalTime").cast("long")
+            ).otherwise(F.lit(None).cast("long"))
+        )       
         .withColumn("tolerance", F.col("config_obj.parameters.tolerance").cast("double"))
         .withColumn("commission", F.col("config_obj.parameters.commission").cast("double"))
         .withColumn("max_query_range_ms", F.col("config_obj.parameters.maxQueryRange").cast("long"))
@@ -3005,8 +3013,8 @@ def create_alert_navigator_views(spark, WAREHOUSE_ROOT: str) -> str:
             F.col("alert_data_obj.evaluationID").alias("evaluation_id"),
             F.col("alert_data_obj.status").alias("alert_status"),
             F.col("created_at_ts").cast("timestamp").alias("ingested_at_ts"),
-            F.col("source_file_path").alias("source_file_path"),
-            F.col("record_hash").alias("record_hash"),
+            # F.col("source_file_path").alias("source_file_path"),
+            # F.col("record_hash").alias("record_hash"),
         )
     )
 
