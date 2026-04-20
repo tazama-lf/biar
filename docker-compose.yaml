@@ -67,8 +67,7 @@ services:
       - .env
       - docker-config
     ports:
-      - "${SCM_UI_PORT}:9876"
-      - "${SCM_CLIENT_PORT}:9860"
+      - 9876:9876
     environment:
       <<: *ozone-replication
       ENSURE_SCM_INITIALIZED: /data/metadata/scm/current/VERSION
@@ -85,8 +84,7 @@ services:
       - .env
       - docker-config
     ports:
-      - "${OM_UI_PORT}:9874"
-      - "${OM_RPC_PORT}:9862"
+      - 9862:9862
     environment:
       <<: *ozone-replication
       ENSURE_OM_INITIALIZED: /data/metadata/om/current/VERSION
@@ -161,7 +159,7 @@ services:
       - .env
       - docker-config
     ports:
-      - "${RECON_PORT}:9888"
+      - 9888:9888
     environment:
       <<: *ozone-replication
       OZONE-SITE.XML_ozone.recon.address: recon:9891
@@ -181,7 +179,7 @@ services:
       - .env
       - docker-config
     ports:
-      - "${S3G_PORT}:9878"
+      - 9878:9878
     environment:
       <<: *ozone-replication
     command: ["ozone", "s3g"]
