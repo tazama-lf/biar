@@ -50,12 +50,15 @@ class DocumentProcessor {
   async run(): Promise<void> {
     await tryCatch(
       async () => {
-        const documents = await this.couchdb.findUnprocessedDocs<IEvidenceDocument>();
+        const documents =
+          await this.couchdb.findUnprocessedDocs<IEvidenceDocument>();
         for (const doc of documents) {
           await this.processDocument(doc);
         }
       },
-      (error) => { this.logger.error('Job failed: ' + error.message, error, 'run'); }
+      (error) => {
+        this.logger.error('Job failed: ' + error.message, error, 'run');
+      }
     );
   }
 
@@ -68,18 +71,31 @@ class DocumentProcessor {
       async () => {
         await this.couchdb.updateStatus(docId, 'PROCESSING');
 
-        const attachmentNames = doc._attachments ? Object.keys(doc._attachments) : [];
-        if (attachmentNames.length === 0) throw new Error('No attachments found');
+        const attachmentNames = doc._attachments
+          ? Object.keys(doc._attachments)
+          : [];
+        if (attachmentNames.length === 0) {
+          throw new Error('No attachments found');
+        }
         const [attachmentName] = attachmentNames;
 
-        if (!doc.metadata || doc.metadata.length === 0) throw new Error('Document metadata missing');
+        if (!doc.metadata || doc.metadata.length === 0) {
+          throw new Error('Document metadata missing');
+        }
         const [fileMeta] = doc.metadata;
 
         if (fileMeta.fileSize > this.config.MAX_FILE_SIZE_MB * BYTES_PER_MB) {
-          throw new Error('File too large: ' + Math.round(fileMeta.fileSize / BYTES_PER_MB) + 'MB');
+          throw new Error(
+            'File too large: ' +
+              Math.round(fileMeta.fileSize / BYTES_PER_MB) +
+              'MB'
+          );
         }
 
-        let fileBuffer = await this.couchdb.getAttachment(docId, attachmentName);
+        let fileBuffer = await this.couchdb.getAttachment(
+          docId,
+          attachmentName
+        );
         if (fileMeta.encryption) {
           fileBuffer = this.decryption.decrypt(fileBuffer, fileMeta.encryption);
         }
@@ -93,20 +109,28 @@ class DocumentProcessor {
             : extraction.text;
 
         await tryCatch(
-          () => this.solr.indexDocument({
-            id: docId,
-            evidenceId,
-            taskId,
-            evidenceType: doc.evidenceType,
-            fileName: fileMeta.fileName,
-            content: contentForSolr,
-            contentType: fileMeta.mimeType,
-            uploadedAt: doc.uploadedAt,
-            extractedAt: new Date().toISOString(),
-            textLength: extraction.text.length,
-            processingStatus: 'INDEXED',
-          }),
-          (solrErr) => { this.logger.error('Solr indexing failed for ' + docId + ': ' + solrErr.message, solrErr, 'process'); },
+          async () => {
+            await this.solr.indexDocument({
+              id: docId,
+              evidenceId,
+              taskId,
+              evidenceType: doc.evidenceType,
+              fileName: fileMeta.fileName,
+              content: contentForSolr,
+              contentType: fileMeta.mimeType,
+              uploadedAt: doc.uploadedAt,
+              extractedAt: new Date().toISOString(),
+              textLength: extraction.text.length,
+              processingStatus: 'INDEXED',
+            });
+          },
+          (solrErr) => {
+            this.logger.error(
+              'Solr indexing failed for ' + docId + ': ' + solrErr.message,
+              solrErr,
+              'process'
+            );
+          },
           true
         );
         this.logger.log('Sent to solr');
@@ -131,15 +155,35 @@ class DocumentProcessor {
         );
 
         await tryCatch(
-          () => this.couchdb.updateStatus(docId, 'COMPLETED'),
-          (finalizeErr) => { this.logger.error('Failed to mark COMPLETED for ' + docId, finalizeErr, 'process'); }
+          async () => {
+            await this.couchdb.updateStatus(docId, 'COMPLETED');
+          },
+          (finalizeErr) => {
+            this.logger.error(
+              'Failed to mark COMPLETED for ' + docId,
+              finalizeErr,
+              'process'
+            );
+          }
         );
       },
       async (error) => {
-        this.logger.error('Failed ' + docId + ': ' + error.message, error, 'process');
+        this.logger.error(
+          'Failed ' + docId + ': ' + error.message,
+          error,
+          'process'
+        );
         await tryCatch(
-          () => this.couchdb.updateStatus(docId, 'ERROR', error.message),
-          (updateErr) => { this.logger.error('Failed to mark ERROR status for ' + docId, updateErr, 'process'); }
+          async () => {
+            await this.couchdb.updateStatus(docId, 'ERROR', error.message);
+          },
+          (updateErr) => {
+            this.logger.error(
+              'Failed to mark ERROR status for ' + docId,
+              updateErr,
+              'process'
+            );
+          }
         );
       }
     );
