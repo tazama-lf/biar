@@ -43,6 +43,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY *.py .
 
-EXPOSE 8181
+EXPOSE 8282
 
 CMD ["sh", "-c", "python lakehouse_query_api.py"]

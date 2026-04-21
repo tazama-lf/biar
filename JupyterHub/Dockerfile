@@ -47,10 +47,13 @@ COPY requirements.txt .
 RUN pip3 install --upgrade pip && \
     pip3 install --no-cache-dir -r requirements.txt
 
-RUN mkdir -p /srv/notebooks
+RUN mkdir -p /data /etc/jupyterhub /srv/notebooks
+
+COPY jupyterhub_config.py /etc/jupyterhub/jupyterhub_config.py
+COPY notebooks/ /srv/notebooks/
 
 WORKDIR /srv/notebooks
 
-EXPOSE 8888
+EXPOSE 8000
 
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--NotebookApp.token=''", "--notebook-dir=/srv/notebooks"]
+CMD ["jupyterhub", "--config=/etc/jupyterhub/jupyterhub_config.py"]

@@ -1,4 +1,6 @@
 jupyterlab
+jupyterhub
+jupyterhub-nativeauthenticator
 pyspark==3.4.2
 pandas
 numpy
