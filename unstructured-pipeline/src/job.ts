@@ -20,7 +20,8 @@ async function tryCatch<T>(
   try {
     return await fn();
   } catch (error) {
-    await onError(error as Error);
+    const err = error instanceof Error ? error : new Error(String(error));
+    await onError(err);
     if (rethrow) throw error;
     return undefined;
   }
