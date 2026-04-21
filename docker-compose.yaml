@@ -286,16 +286,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    secrets:
-      - GH_TOKEN
     depends_on:
       - tika
       - solr
       - nifi
 
-secrets:
-  GH_TOKEN:
-    environment: GH_TOKEN
 
 volumes:
   solr_data:
