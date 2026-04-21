@@ -165,7 +165,8 @@ class DocumentProcessor {
               finalizeErr,
               'process'
             );
-          }
+          },
+          true
         );
       },
       async (error) => {
