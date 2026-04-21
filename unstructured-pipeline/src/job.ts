@@ -149,9 +149,9 @@ class DocumentProcessor {
               extractedAt: new Date().toISOString(),
             });
           },
-          async (error) => {
-            this.logger.log('failing sending to nifi ' + JSON.stringify(error));
-            await this.couchdb.updateStatus(docId, 'ERROR', error.message);
+          (error) => {
+            this.logger.log('NIFI send failed for ' + docId + JSON.stringify(error.message));
+            this.couchdb.updateStatus(docId, 'ERROR', error.message);
           }
         );
 
