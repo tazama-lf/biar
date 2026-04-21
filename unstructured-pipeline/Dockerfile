@@ -18,10 +18,9 @@ RUN npm run build
 FROM ${RUN_IMAGE} AS run-env
 
 WORKDIR /app
-COPY --chown=node:node --from=builder /app/node_modules ./node_modules
-COPY --chown=node:node --from=builder /app/dist ./dist
-COPY --chown=node:node package.json ./
-USER node
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package.json ./
 
 # Execute watchdog command
-CMD ["node", "dist/job.js"]
+CMD ["dist/job.js"]

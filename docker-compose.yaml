@@ -51,6 +51,7 @@ services:
       NIFI_JVM_HEAP_MAX: 1g
     ports:
       - "${NIFI_PORT}:8088"
+      - 8081:8081
     volumes:
       - nifi_conf:/opt/nifi/nifi-current/conf
       - nifi_state:/opt/nifi/nifi-current/state
@@ -277,20 +278,23 @@ services:
       - ./nifi:/nifi:ro
     entrypoint: ["/bin/sh", "/nifi/init.sh"]
   
-  # unstructured-pipeline:
-  #   build:
-  #     context: ./unstructured-pipeline
-  #     dockerfile: Dockerfile
-  #   container_name: biar-unstructured-pipeline
-  #   restart: unless-stopped
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     TIKA_SERVER_URL: http://tika:${TIKA_PORT}/tika
-  #     SOLR_URL: http://solr:${SOLR_PORT}/solr/biar_docs
-  #   depends_on:
-  #     - tika
-  #     - solr
+  unstructured-pipeline:
+    build:
+      context: ./unstructured-pipeline
+      dockerfile: Dockerfile
+    container_name: biar-unstructured-pipeline
+    restart: unless-stopped
+    env_file:
+      - .env
+    secrets:
+      - GH_TOKEN
+    depends_on:
+      - tika
+      - solr
+
+secrets:
+  GH_TOKEN:
+    environment: GH_TOKEN
 
 volumes:
   solr_data:
