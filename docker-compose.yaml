@@ -291,6 +291,7 @@ services:
     depends_on:
       - tika
       - solr
+      - nifi
 
 secrets:
   GH_TOKEN:
