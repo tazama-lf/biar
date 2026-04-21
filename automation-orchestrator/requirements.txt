@@ -1,0 +1,4 @@
+fastapi
+uvicorn
+pandas
+pyspark==3.4.2

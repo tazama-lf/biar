@@ -41,7 +41,7 @@ jobs:
       continue-on-error: true
       uses: ajinabraham/njsscan-action@d58d8b2f26322cd35a9efb8003baac517f226d81
       with:
-        args: '. --sarif --output results.sarif'
+        args: './unstructured-pipeline --sarif --output results.sarif'
     - name: Upload njsscan report
       uses: github/codeql-action/upload-sarif@60168ffe96596fce55ee3851b6bb7b2e1ea8dbb0  # v4.35.1
       if: steps.njsscan.outcome == 'success'
