@@ -20,9 +20,7 @@ async function tryCatch<T>(
   try {
     return await fn();
   } catch (error) {
-    await onError(error as Error);
-    if (rethrow) throw error;
-    return undefined;
+    
   }
 }
 
