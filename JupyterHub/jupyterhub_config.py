@@ -1,5 +1,4 @@
 import os
-import pwd
 import subprocess
 
 c = get_config()  # noqa: F821
@@ -31,9 +30,9 @@ c.JupyterHub.authenticator_class = "nativeauthenticator.NativeAuthenticator"
 admin = os.environ.get("JUPYTERHUB_ADMIN", "admin")
 c.Authenticator.admin_users = {admin}
 
-# Admin can authorize new users; non-admin signups require admin approval
-c.NativeAuthenticator.open_signup = True
-c.Authenticator.allow_all = True
+# Users must be authorized by an admin before they can log in
+c.NativeAuthenticator.open_signup = False
+c.Authenticator.allow_all = False
 
 # --- Networking ---
 c.JupyterHub.ip = "0.0.0.0"
@@ -44,17 +43,11 @@ c.JupyterHub.cookie_secret_file = "/data/jupyterhub_cookie_secret"
 c.JupyterHub.db_url = "sqlite:////data/jupyterhub.sqlite"
 
 
-# --- Auto-create system users when they sign up ---
+# Ensure shared notebooks are readable by all spawned servers
 def pre_spawn_hook(spawner):
-    username = spawner.user.name
-    try:
-        pwd.getpwnam(username)
-    except KeyError:
-        subprocess.run(
-            ["useradd", "-m", "-s", "/bin/bash", "-N", username],
-            check=True,
-        )
-    # Ensure user can read the shared notebooks
+    # SimpleLocalProcessSpawner runs as root — no system user creation needed.
+    # Email-style usernames (e.g. user@domain.org) are invalid Linux usernames
+    # and would cause useradd to fail. Just fix notebook permissions.
     subprocess.run(["chmod", "-R", "o+rX", "/srv/notebooks"], check=False)
 
 
