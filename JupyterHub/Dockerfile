@@ -6,7 +6,10 @@ RUN apt-get update && apt-get install -y \
     procps \
     ca-certificates \
     tar \
-    && rm -rf /var/lib/apt/lists/*
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g configurable-http-proxy
 
 # Java 11 (Temurin)
 ARG TEMURIN_11_TAG=jdk-11.0.30+7
