@@ -6,8 +6,12 @@ c = get_config()  # noqa: F821
 # --- Spawner: local processes, all on the same server ---
 c.JupyterHub.spawner_class = "simple"
 c.Spawner.notebook_dir = "/srv/notebooks"
-c.Spawner.args = ["--ServerApp.root_dir=/srv/notebooks"]
+c.Spawner.args = ["--ServerApp.root_dir=/srv/notebooks", "--allow-root"]
 c.Spawner.default_url = "/lab"
+
+# Spark/Java initialization can take >30s; give the notebook server more time.
+c.Spawner.http_timeout = 120
+c.Spawner.start_timeout = 120
 
 # Pass environment variables from JupyterHub to each user's notebook server
 c.Spawner.environment = {
