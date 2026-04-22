@@ -30,9 +30,12 @@ c.JupyterHub.authenticator_class = "nativeauthenticator.NativeAuthenticator"
 admin = os.environ.get("JUPYTERHUB_ADMIN", "admin")
 c.Authenticator.admin_users = {admin}
 
-# Users must be authorized by an admin before they can log in
+# New signups require admin approval before they can log in.
+# NativeAuthenticator's own is_authorized flag (set to 0 on signup) is the
+# security gate — allow_all=True just prevents JupyterHub from adding a second,
+# conflicting block on top of NativeAuthenticator's own authorization check.
 c.NativeAuthenticator.open_signup = False
-c.Authenticator.allow_all = False
+c.Authenticator.allow_all = True
 
 # --- Networking ---
 c.JupyterHub.ip = "0.0.0.0"
