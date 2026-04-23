@@ -89,6 +89,7 @@ A multi-user notebook environment pre-loaded with analytics dashboards:
 ### NiFi
 
 A custom Apache NiFi deployment with pre-built flow templates (`tazama.xml`) and PostgreSQL JDBC driver. Initialization scripts automatically configure parameter contexts for S3, Ozone, and HTTP endpoints.
+https://github.com/tazama-lf/docs/blob/dev/Technical/Deployment-Guides/Nifi-Deployment-Guide.md
 
 ### Unstructured Pipeline
 
