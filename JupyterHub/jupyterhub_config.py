@@ -8,7 +8,7 @@ c.JupyterHub.spawner_class = "simple"
 # Each user gets an isolated workspace under /srv/notebooks/{username}.
 # Shared dashboards are symlinked read-only from /srv/shared_notebooks.
 c.Spawner.notebook_dir = "/srv/notebooks/{username}"
-c.Spawner.args = ["--ServerApp.root_dir=/srv/notebooks/{username}", "--allow-root"]
+c.Spawner.args = ["--allow-root"]
 c.Spawner.default_url = "/lab"
 
 # Spark/Java initialization can take >30s; give the notebook server more time.
