@@ -50,10 +50,13 @@ COPY requirements.txt .
 RUN pip3 install --upgrade pip && \
     pip3 install --no-cache-dir -r requirements.txt
 
-RUN mkdir -p /data /etc/jupyterhub /srv/notebooks
+# Shared (read-only) notebooks baked into the image.
+# Per-user workspaces are created at spawn time under /srv/notebooks/{username}.
+RUN mkdir -p /data /etc/jupyterhub /srv/shared_notebooks /srv/notebooks
 
 COPY jupyterhub_config.py /etc/jupyterhub/jupyterhub_config.py
-COPY notebooks/ /srv/notebooks/
+COPY notebooks/ /srv/shared_notebooks/
+RUN chmod -R a+rX /srv/shared_notebooks
 
 WORKDIR /srv/notebooks
 
