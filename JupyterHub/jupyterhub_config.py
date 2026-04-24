@@ -1,5 +1,4 @@
 import os
-import pwd
 import subprocess
 
 c = get_config()  # noqa: F821
@@ -7,8 +6,12 @@ c = get_config()  # noqa: F821
 # --- Spawner: local processes, all on the same server ---
 c.JupyterHub.spawner_class = "simple"
 c.Spawner.notebook_dir = "/srv/notebooks"
-c.Spawner.args = ["--ServerApp.root_dir=/srv/notebooks"]
+c.Spawner.args = ["--ServerApp.root_dir=/srv/notebooks", "--allow-root"]
 c.Spawner.default_url = "/lab"
+
+# Spark/Java initialization can take >30s; give the notebook server more time.
+c.Spawner.http_timeout = 120
+c.Spawner.start_timeout = 120
 
 # Pass environment variables from JupyterHub to each user's notebook server
 c.Spawner.environment = {
@@ -31,8 +34,11 @@ c.JupyterHub.authenticator_class = "nativeauthenticator.NativeAuthenticator"
 admin = os.environ.get("JUPYTERHUB_ADMIN", "admin")
 c.Authenticator.admin_users = {admin}
 
-# Admin can authorize new users; non-admin signups require admin approval
-c.NativeAuthenticator.open_signup = True
+# New signups require admin approval before they can log in.
+# NativeAuthenticator's own is_authorized flag (set to 0 on signup) is the
+# security gate — allow_all=True just prevents JupyterHub from adding a second,
+# conflicting block on top of NativeAuthenticator's own authorization check.
+c.NativeAuthenticator.open_signup = False
 c.Authenticator.allow_all = True
 
 # --- Networking ---
@@ -44,17 +50,11 @@ c.JupyterHub.cookie_secret_file = "/data/jupyterhub_cookie_secret"
 c.JupyterHub.db_url = "sqlite:////data/jupyterhub.sqlite"
 
 
-# --- Auto-create system users when they sign up ---
+# Ensure shared notebooks are readable by all spawned servers
 def pre_spawn_hook(spawner):
-    username = spawner.user.name
-    try:
-        pwd.getpwnam(username)
-    except KeyError:
-        subprocess.run(
-            ["useradd", "-m", "-s", "/bin/bash", "-N", username],
-            check=True,
-        )
-    # Ensure user can read the shared notebooks
+    # SimpleLocalProcessSpawner runs as root — no system user creation needed.
+    # Email-style usernames (e.g. user@domain.org) are invalid Linux usernames
+    # and would cause useradd to fail. Just fix notebook permissions.
     subprocess.run(["chmod", "-R", "o+rX", "/srv/notebooks"], check=False)
 
 

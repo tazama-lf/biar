@@ -63,6 +63,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Generate artifact attestation
+        continue-on-error: true
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-automation-orchestrator
@@ -118,6 +119,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Generate artifact attestation
+        continue-on-error: true
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-datalakehouse-api
@@ -173,6 +175,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Generate artifact attestation
+        continue-on-error: true
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-jupyterlab
@@ -230,6 +233,7 @@ jobs:
             GH_TOKEN=${{ secrets.GH_TOKEN }}
 
       - name: Generate artifact attestation
+        continue-on-error: true
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-unstructured-pipeline
@@ -285,6 +289,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Generate artifact attestation
+        continue-on-error: true
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-nifi

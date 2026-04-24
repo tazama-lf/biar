@@ -6,7 +6,10 @@ RUN apt-get update && apt-get install -y \
     procps \
     ca-certificates \
     tar \
-    && rm -rf /var/lib/apt/lists/*
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g configurable-http-proxy
 
 # Java 11 (Temurin)
 ARG TEMURIN_11_TAG=jdk-11.0.30+7
@@ -47,10 +50,13 @@ COPY requirements.txt .
 RUN pip3 install --upgrade pip && \
     pip3 install --no-cache-dir -r requirements.txt
 
-RUN mkdir -p /srv/notebooks
+RUN mkdir -p /data /etc/jupyterhub /srv/notebooks
+
+COPY jupyterhub_config.py /etc/jupyterhub/jupyterhub_config.py
+COPY notebooks/ /srv/notebooks/
 
 WORKDIR /srv/notebooks
 
-EXPOSE 8888
+EXPOSE 8000
 
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--NotebookApp.token=''", "--notebook-dir=/srv/notebooks"]
+CMD ["jupyterhub", "--config=/etc/jupyterhub/jupyterhub_config.py"]
