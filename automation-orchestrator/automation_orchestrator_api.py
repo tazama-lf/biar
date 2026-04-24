@@ -159,9 +159,6 @@ def submit(
         "execute_notebook": req.execute_notebook
     }
 
-    with open(OUTPUT_REQUEST, "a") as f:
-        f.write(json.dumps(payload) + "\n")
-
     # Only store metadata (no execution)
     if not req.execute_notebook:
         return {

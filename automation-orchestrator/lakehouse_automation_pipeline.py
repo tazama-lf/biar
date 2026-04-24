@@ -64,21 +64,21 @@ def get_spark_session():
         .config("spark.sql.extensions", "org.apache.spark.sql.hudi.HoodieSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.hudi.catalog.HoodieCatalog")
         # Memory & performance
-        .config("spark.local.dir", spark_local_dir)
-        .config("spark.driver.memory", "6g")
-        .config("spark.driver.memoryOverhead", "2g")
-        .config("spark.driver.maxResultSize", "4g")
-        .config("spark.executor.memory", "6g")
-        .config("spark.executor.memoryOverhead", "2g")
-        .config("spark.sql.shuffle.partitions", "48")
-        .config("spark.default.parallelism", "48")
-        .config("spark.executor.cores", "2")  # Limit to 2 cores per executor
-        .config("spark.driver.cores", "2")    # Limit to 2 cores for the driver
-        .config("spark.memory.fraction", "0.6")
-        .config("spark.memory.storageFraction", "0.3")
+        .config("spark.local.dir", _env("SPARK_LOCAL_DIR", "/tmp/spark"))
+        .config("spark.driver.memory", _env("SPARK_DRIVER_MEMORY", "6g"))
+        .config("spark.driver.memoryOverhead", _env("SPARK_DRIVER_MEMORY_OVERHEAD", "2g"))
+        .config("spark.driver.maxResultSize", _env("SPARK_DRIVER_MAX_RESULT_SIZE", "4g"))
+        .config("spark.executor.memory", _env("SPARK_EXECUTOR_MEMORY", "6g"))
+        .config("spark.executor.memoryOverhead", _env("SPARK_EXECUTOR_MEMORY_OVERHEAD", "2g"))
+        .config("spark.sql.shuffle.partitions", _env("SPARK_SQL_SHUFFLE_PARTITIONS", "48"))
+        .config("spark.default.parallelism", _env("SPARK_DEFAULT_PARALLELISM", "48"))
+        .config("spark.executor.cores", _env("SPARK_EXECUTOR_CORES", "2"))  # ignored in local[N] mode; applies in cluster mode
+        .config("spark.driver.cores", _env("SPARK_DRIVER_CORES", "2"))    # ignored in local[N] mode; applies in cluster mode
+        .config("spark.memory.fraction", _env("SPARK_MEMORY_FRACTION", "0.6"))
+        .config("spark.memory.storageFraction", _env("SPARK_MEMORY_STORAGE_FRACTION", "0.3"))
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "64mb")
+        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", _env("SPARK_SQL_ADVISORY_PARTITION_SIZE", "64mb"))
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY")
         .config("spark.sql.session.timeZone", "UTC")
         .getOrCreate()
@@ -92,10 +92,11 @@ def get_spark_session():
 # COMMON HELPERS (extracted once for reuse)
 # ===================================================================
 def hudi_opts(table_name: str, record_key: str, precombine: str, partition: str = None, payload_class: str = None):
+    shuffle_parallelism = _env("SPARK_DEFAULT_PARALLELISM", "48")
     opts = {
         "hoodie.table.name": table_name,
-        "hoodie.upsert.shuffle.parallelism": "48",
-        "hoodie.insert.shuffle.parallelism": "48",
+        "hoodie.upsert.shuffle.parallelism": shuffle_parallelism,
+        "hoodie.insert.shuffle.parallelism": shuffle_parallelism,
         "hoodie.datasource.write.table.type": "COPY_ON_WRITE",
         "hoodie.datasource.write.operation": "upsert",
         "hoodie.datasource.write.recordkey.field": record_key,
@@ -106,13 +107,9 @@ def hudi_opts(table_name: str, record_key: str, precombine: str, partition: str 
         "hoodie.schema.on.read.enable": "true",
         "hoodie.metadata.enable": "false",
         "hoodie.index.type": "BLOOM",
-        "hoodie.upsert.shuffle.parallelism": "48",
-        "hoodie.insert.shuffle.parallelism": "48",
-        "hoodie.parquet.max.file.size": str(128 * 1024 * 1024),
-        "hoodie.parquet.small.file.limit": str(100 * 1024 * 1024),
-        "hoodie.memory.merge.fraction": "0.2",
-        "hoodie.metadata.enable": "true",
-
+        "hoodie.parquet.max.file.size": _env("HUDI_PARQUET_MAX_FILE_SIZE", str(128 * 1024 * 1024)),
+        "hoodie.parquet.small.file.limit": _env("HUDI_PARQUET_SMALL_FILE_LIMIT", str(100 * 1024 * 1024)),
+        "hoodie.memory.merge.fraction": _env("HUDI_MEMORY_MERGE_FRACTION", "0.2"),
     }
     if partition:
         opts.update({
