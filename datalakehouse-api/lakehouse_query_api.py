@@ -18,6 +18,7 @@ import json
 import time
 import logging
 import re
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pipeline")
@@ -92,46 +93,6 @@ app = FastAPI(
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="spark-worker")
 SPARK_JOB_TIMEOUT = 120
 
-async def run_in_executor(fn, *args, timeout: float = SPARK_JOB_TIMEOUT, job_group: str = None):
-    """Run a blocking function in the thread pool with an optional timeout and Spark job group cancellation."""
-    if job_group is None:
-        job_group = str(uuid.uuid4())
-
-    spark = get_spark()
-    
-    def wrapped_fn(*args):
-        with _spark_lock:
-            spark.sparkContext.setJobGroup(job_group, f"Spark job for {fn.__name__}", interruptOnCancel=True)
-        return fn(*args, job_group=job_group)
-    # NOTE: clearJobGroup not available in PySpark SparkContext; group auto-cleared or overwritten by next setJobGroup
-
-    loop = asyncio.get_event_loop()
-    future = loop.run_in_executor(_executor, wrapped_fn, *args)
-    try:
-        return await asyncio.wait_for(future, timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.warning(f"Cancelling Spark job group {job_group} due to timeout")
-        with _spark_lock:
-            spark.sparkContext.cancelJobGroup(job_group)
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail={"status": "error", "code": 504,
-                    "message": f"Spark job {job_group} exceeded timeout of {timeout}s"}
-        )
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    errors = []
-    for error in exc.errors():
-        field = ".".join(str(loc) for loc in error["loc"] if loc != "body")
-        errors.append({"field": field, "message": error["msg"], "type": error["type"]})
-    return JSONResponse(
-        status_code=422,
-        content={"status": "error", "code": 422, "message": "Validation error", "errors": errors}
-    )
-
-
 # ---------------------------
 # PATHS
 # ---------------------------
@@ -183,10 +144,8 @@ GOLD_PATHS = {
 }
 
 # ---------------------------
-# Schema cache 
+# Schema cache
 # ---------------------------
-# Schema inference is a full Spark job. Cache inferred schemas so it runs only once
-# per process lifetime (invalidated explicitly if schemas change).
 _schema_cache: Dict[str, T.StructType] = {}
 _schema_cache_lock = threading.Lock()
 
@@ -241,13 +200,31 @@ def compute_record_hash(df, exclude_cols=None):
         )
     )
 
+
+# ============================================================
+# Request Models
+# ============================================================
+
+class QueryRequest(BaseModel):
+    table_name: str
+    filters: Optional[Dict[str, Union[str, int, float, List[str], List[int], List[float]]]] = None
+    columns: Optional[List[str]] = None
+    limit: Optional[int] = 100
+
+
+class SQLQueryRequest(BaseModel):
+    sql_query: str
+    limit: Optional[int] = 1000
+
+
 # ============================================================
 # Helper: Query Hudi data (Gold registry)
 # ============================================================
 
 MAX_ROWS = 10000
 
-def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = None, limit: int = None, job_group: str = None):
+
+def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = None, limit: int = None):
     """Synchronous query — called from thread pool."""
     if table_name not in GOLD_PATHS:
         raise ValueError(f"Table '{table_name}' not found in Gold registry")
@@ -277,7 +254,7 @@ def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = N
             else:
                 df = df.filter(F.col(col_name) == value)
 
-    # Apply columns selection
+    # Apply column selection
     if columns:
         df = df.select(*columns)
 
@@ -290,8 +267,27 @@ def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = N
     return [row.asDict(recursive=True) for row in df.collect()]
 
 
-import uuid
-import re
+def _execute_sql_sync(sql_query: str, limit: int = None):
+    """
+    Serialised temp-view registration + SQL execution.
+    Uses a module-level lock to prevent concurrent requests from corrupting each
+    other's view registrations.
+    """
+    spark = get_spark()
+    with _sql_lock:
+        for tname, path in GOLD_PATHS.items():
+            if os.path.isdir(path):
+                spark.read.format("hudi").load(path).createOrReplaceTempView(tname)
+            else:
+                logger.warning(f"Path for table '{tname}' not found: {path}")
+
+        df = spark.sql(sql_query)
+
+        if limit:
+            df = df.limit(limit)
+
+        return [row.asDict(recursive=True) for row in df.collect()]
+
 
 async def run_in_executor(fn, *args, timeout: float = SPARK_JOB_TIMEOUT):
     """Run a blocking function in the thread pool with an optional timeout."""
@@ -307,134 +303,20 @@ async def run_in_executor(fn, *args, timeout: float = SPARK_JOB_TIMEOUT):
         )
 
 
-
-def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = None, limit: int = None):
-    """Synchronous query — called from thread pool."""
-    if table_name not in GOLD_PATHS:
-        raise ValueError(f"Table '{table_name}' not found in Gold registry")
-
-    spark = get_spark()
-    path = GOLD_PATHS[table_name]
-    df = spark.read.format("hudi").load(path)
-    valid_columns = set(df.columns)
-
-    if filters:
-        for col_name, value in filters.items():
-            if col_name not in valid_columns or value is None:
-                continue
-            if isinstance(value, list):
-                if value:
-                    df = df.filter(F.col(col_name).isin(value))
-            else:
-                df = df.filter(F.col(col_name) == value)
-
-    if columns:
-        valid_select_cols = [c for c in columns if c in valid_columns]
-        if valid_select_cols:
-            df = df.select(*valid_select_cols)
-
-    if limit:
-        df = df.limit(limit)
-
-    return [row.asDict(recursive=True) for row in df.collect()]
-
-
-import re
-
-def _execute_sql_sync(sql_query: str, limit: int = None):
-    """
-    Serialised temp-view registration + SQL execution.
-    Uses a module-level lock to prevent concurrent requests from corrupting each
-    other's view registrations.
-    """
-    spark = get_spark()
-    with _sql_lock:
-        for tname, path in GOLD_PATHS.items():
-            # Check if the table path exists before loading
-            if os.path.isdir(path):
-                spark.read.format("hudi").load(path).createOrReplaceTempView(tname)
-            else:
-                # Log warning if the table path is missing
-                logger.warning(f"Path for table '{tname}' not found: {path}")
-        
-        # Now execute the SQL query
-        df = spark.sql(sql_query)
-        
-        if limit:
-            df = df.limit(limit)
-        
-        # Collect results as dictionaries
-        return [row.asDict(recursive=True) for row in df.collect()]
-
 # ============================================================
-# Request Models
+# Exception Handlers
 # ============================================================
 
-class QueryRequest(BaseModel):
-    table_name: str
-    filters: Optional[Dict[str, Union[str, int, float, List[str], List[int], List[float]]]] = None
-    columns: Optional[List[str]] = None
-    limit: Optional[int] = 100
-
-
-class SQLQueryRequest(BaseModel):
-    sql_query: str
-    limit: Optional[int] = 1000
-@app.post("/execute_sql", status_code=status.HTTP_200_OK)
-async def execute_sql(request: SQLQueryRequest):
-    sql_query = request.sql_query.strip()
-
-    # Sanitise escapes from some HTTP clients
-    sql_query = re.sub(r"(\\')+(\\')+(\\')+'", "'", sql_query)
-    sql_query = re.sub(r"\\'\\'\\'", "'", sql_query)
-    sql_query = re.sub(r"\\'", "'", sql_query)
-    sql_query = re.sub(r'\s+', ' ', sql_query).strip()
-
-    forbidden_patterns = [
-        r'\bINSERT\s+INTO\b', r'\bUPDATE\s+', r'\bDELETE\s+FROM\b', r'\bDROP\s+',
-        r'\bCREATE\s+', r'\bALTER\s+', r'\bTRUNCATE\s+', r'\bMERGE\s+INTO\b', r'\bREPLACE\s+INTO\b'
-    ]
-    q_upper = sql_query.upper()
-
-    for pattern in forbidden_patterns:
-        if re.search(pattern, q_upper):
-            raise HTTPException(
-                status_code=403,
-                detail={"status": "error", "code": 403, "message": "Only SELECT allowed"}
-            )
-
-    if not (q_upper.startswith("SELECT") or q_upper.startswith("WITH")):
-        raise HTTPException(
-            status_code=400,
-            detail={"status": "error", "code": 400, "message": "Only SELECT/WITH allowed"}
-        )
-
-    try:
-        data = await run_in_executor(_execute_sql_sync, sql_query, request.limit)
-        return {"status": "success", "code": 200, "query": sql_query, "row_count": len(data), "data": data}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("execute_sql error")
-        raise HTTPException(
-            status_code=500,
-            detail={"status": "error", "code": 500, "message": "SQL Query error", "error_details": str(e)[:120]}
-        )
-
-# ============================================================
-# Request Models
-# ============================================================
-
-class QueryRequest(BaseModel):
-    table_name: str
-    filters: Optional[Dict[str, Union[str, int, float, List[str], List[int], List[float]]]] = None
-    columns: Optional[List[str]] = None
-    limit: Optional[int] = 100
-
-class SQLQueryRequest(BaseModel):
-    sql_query: str
-    limit: Optional[int] = 1000
-
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = []
+    for error in exc.errors():
+        field = ".".join(str(loc) for loc in error["loc"] if loc != "body")
+        errors.append({"field": field, "message": error["msg"], "type": error["type"]})
+    return JSONResponse(
+        status_code=422,
+        content={"status": "error", "code": 422, "message": "Validation error", "errors": errors}
+    )
 
 
 # ============================================================
@@ -447,11 +329,10 @@ def read_root():
         "status": "online",
         "message": "Lakehouse Query API (Ozone Alerts Gold)",
         "warehouse_root": WAREHOUSE_ROOT,
-    "endpoints": ["/health", "/tables", "/query", "/execute_sql", "/invalidate_schema_cache"]
+        "endpoints": ["/health", "/tables", "/query", "/execute_sql", "/invalidate_schema_cache"]
     }
 
 
-# FIX: Real health check — verifies Spark is alive and the warehouse root is accessible
 @app.get("/health", status_code=status.HTTP_200_OK)
 async def health_check():
     checks: Dict[str, Any] = {}
@@ -460,7 +341,6 @@ async def health_check():
     # 1. Spark session liveness
     try:
         spark = get_spark()
-        # A trivial Spark action to confirm the driver is responsive
         spark.range(1).count()
         checks["spark"] = "ok"
     except Exception as e:
@@ -490,7 +370,6 @@ def list_tables():
     return {"available_tables": list(GOLD_PATHS.keys())}
 
 
-# FIX: async endpoint now dispatches blocking Spark work to the thread pool
 @app.post("/query", status_code=status.HTTP_200_OK)
 async def query_table(request: QueryRequest):
     try:
@@ -523,17 +402,8 @@ async def query_table(request: QueryRequest):
         )
 
 
-# FIX: async + serialised temp-view registration
-@app.post("/invalidate_schema_cache", status_code=status.HTTP_200_OK)
-async def invalidate_schema_cache_endpoint():
-    """FIX: Manually invalidate the schema cache after a schema migration."""
-    invalidate_schema_cache()
-    return {"status": "success", "message": "Schema cache invalidated"}
-
-
 @app.post("/execute_sql", status_code=status.HTTP_200_OK)
 async def execute_sql(request: SQLQueryRequest):
-    spark = get_spark()  
     sql_query = request.sql_query.strip()
 
     # Sanitise escapes from some HTTP clients
@@ -562,17 +432,8 @@ async def execute_sql(request: SQLQueryRequest):
         )
 
     try:
-        # Debugging: Ensure pacs008 exists and can be loaded
-        if os.path.isdir(f"{WAREHOUSE_ROOT}/gold/pacs008"):
-            print("pacs008 exists, loading it...")
-            spark.read.format("hudi").load(f"{WAREHOUSE_ROOT}/gold/pacs008").createOrReplaceTempView("pacs008")
-        else:
-            print("pacs008 path does not exist")
-
-        # Execute the SQL query
         data = await run_in_executor(_execute_sql_sync, sql_query, request.limit)
         return {"status": "success", "code": 200, "query": sql_query, "row_count": len(data), "data": data}
-    
     except HTTPException:
         raise
     except Exception as e:
@@ -581,6 +442,15 @@ async def execute_sql(request: SQLQueryRequest):
             status_code=500,
             detail={"status": "error", "code": 500, "message": "SQL Query error", "error_details": str(e)[:120]}
         )
+
+
+@app.post("/invalidate_schema_cache", status_code=status.HTTP_200_OK)
+async def invalidate_schema_cache_endpoint():
+    """Manually invalidate the schema cache after a schema migration."""
+    invalidate_schema_cache()
+    return {"status": "success", "message": "Schema cache invalidated"}
+
+
 # ============================================================
 # Run server
 # ============================================================
