@@ -199,8 +199,9 @@ services:
     ports:
       - 7619:7619
     volumes:
-      - ./automation-orchestrator/out:/app/out
       - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Warehouse
+    environment:
+      - WAREHOUSE_ROOT=/opt/Tazama_Warehouse
     tmpfs:
       - /tmp/spark
     depends_on:

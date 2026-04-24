@@ -15,9 +15,7 @@ def _env(name: str, default: str = "") -> str:
         return default
     return value.strip()
 
-DEFAULT_WAREHOUSE_ROOT = _env(
-    "WAREHOUSE_ROOT",
-)
+DEFAULT_WAREHOUSE_ROOT = _env("WAREHOUSE_ROOT", "/opt/Tazama_Warehouse")
 
 # ===================================================================
 # SPARK SESSION (reusable & configurable)
@@ -26,7 +24,7 @@ def get_spark_session():
     spark_home = _env("SPARK_HOME", "/opt/spark")
     os.environ["SPARK_HOME"] = spark_home
 
-    spark_master = _env("SPARK_MASTER", "local[1]")
+    spark_master = _env("SPARK_MASTER", "local[2]")
     spark_local_dir = _env("SPARK_LOCAL_DIR", "/tmp/spark")
     # Also set the env var Spark honors for local scratch.
     os.environ.setdefault("SPARK_LOCAL_DIRS", spark_local_dir)
@@ -67,20 +65,20 @@ def get_spark_session():
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.hudi.catalog.HoodieCatalog")
         # Memory & performance
         .config("spark.local.dir", spark_local_dir)
-        .config("spark.driver.memory", "2g")
-        .config("spark.driver.memoryOverhead", "1g")
-        .config("spark.driver.maxResultSize", "1g")
-        .config("spark.executor.memory", "2g")
-        .config("spark.executor.memoryOverhead", "1g")
-        .config("spark.sql.shuffle.partitions", "16")
-        .config("spark.default.parallelism", "16")
+        .config("spark.driver.memory", "6g")
+        .config("spark.driver.memoryOverhead", "2g")
+        .config("spark.driver.maxResultSize", "4g")
+        .config("spark.executor.memory", "6g")
+        .config("spark.executor.memoryOverhead", "2g")
+        .config("spark.sql.shuffle.partitions", "48")
+        .config("spark.default.parallelism", "48")
         .config("spark.executor.cores", "2")  # Limit to 2 cores per executor
         .config("spark.driver.cores", "2")    # Limit to 2 cores for the driver
-        .config("spark.memory.fraction", "0.8")
-        .config("spark.memory.storageFraction", "0.2")
+        .config("spark.memory.fraction", "0.6")
+        .config("spark.memory.storageFraction", "0.3")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "128mb")
+        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "64mb")
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY")
         .config("spark.sql.session.timeZone", "UTC")
         .getOrCreate()
@@ -96,6 +94,8 @@ def get_spark_session():
 def hudi_opts(table_name: str, record_key: str, precombine: str, partition: str = None, payload_class: str = None):
     opts = {
         "hoodie.table.name": table_name,
+        "hoodie.upsert.shuffle.parallelism": "48",
+        "hoodie.insert.shuffle.parallelism": "48",
         "hoodie.datasource.write.table.type": "COPY_ON_WRITE",
         "hoodie.datasource.write.operation": "upsert",
         "hoodie.datasource.write.recordkey.field": record_key,
@@ -106,12 +106,19 @@ def hudi_opts(table_name: str, record_key: str, precombine: str, partition: str 
         "hoodie.schema.on.read.enable": "true",
         "hoodie.metadata.enable": "false",
         "hoodie.index.type": "BLOOM",
+        "hoodie.upsert.shuffle.parallelism": "48",
+        "hoodie.insert.shuffle.parallelism": "48",
+        "hoodie.parquet.max.file.size": str(128 * 1024 * 1024),
+        "hoodie.parquet.small.file.limit": str(100 * 1024 * 1024),
+        "hoodie.memory.merge.fraction": "0.2",
+        "hoodie.metadata.enable": "true",
+
     }
     if partition:
         opts.update({
             "hoodie.datasource.write.partitionpath.field": partition,
             "hoodie.datasource.write.keygenerator.class": "org.apache.hudi.keygen.NonpartitionedKeyGenerator",
-            "hoodie.datasource.write.hive_style_partitioning": "false",
+            "hoodie.datasource.write.hive_style_partitioning": "true",
         })
     else:
         opts["hoodie.datasource.write.keygenerator.class"] = "org.apache.hudi.keygen.NonpartitionedKeyGenerator"
@@ -4708,7 +4715,6 @@ def generate_clustering_data(spark, WAREHOUSE_ROOT):
 def run_clustering(spark, WAREHOUSE_ROOT):
     # full original SHAP + HDBSCAN + typology cards + rule generation
     print("Clustering & Hidden Typology discovery completed")
-
 
 def run_all_views(spark, WAREHOUSE_ROOT=None):
     """Create Hudi-backed views that are buildable from currently available tables."""

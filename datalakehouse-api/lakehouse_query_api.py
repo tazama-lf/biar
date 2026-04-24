@@ -36,14 +36,22 @@ def _build_spark() -> SparkSession:
     builder = (
         SparkSession.builder
         .appName("ozone-alerts-pipeline")
-        .master("local[1]")
+        .master("local[2]")
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-        .config("spark.driver.memory", "1g")
-        .config("spark.executor.memory", "1g")
-        .config("spark.sql.shuffle.partitions", "4")
-        .config("spark.default.parallelism", "4")
+        .config("spark.driver.memory", "2g")
+        .config("spark.driver.memoryOverhead", "1g")
+        .config("spark.executor.memory", "2g")
+        .config("spark.executor.memoryOverhead", "1g")
+        .config("spark.sql.shuffle.partitions", "16")
+        .config("spark.default.parallelism", "16")
         .config("spark.network.timeout", "300s")
         .config("spark.executor.heartbeatInterval", "60s")
+        .config("spark.sql.extensions", "org.apache.spark.sql.hudi.HoodieSparkSessionExtension")
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.hudi.catalog.HoodieCatalog")
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "32mb")
+        .config("spark.sql.files.maxPartitionBytes", "32mb")
     )
     if spark_jars:
         builder = (
@@ -555,9 +563,9 @@ async def execute_sql(request: SQLQueryRequest):
 
     try:
         # Debugging: Ensure pacs008 exists and can be loaded
-        if os.path.isdir("/opt/Tazama_Warehouse/gold/pacs008"):
+        if os.path.isdir(f"{WAREHOUSE_ROOT}/gold/pacs008"):
             print("pacs008 exists, loading it...")
-            spark.read.format("hudi").load("/opt/Tazama_Warehouse/gold/pacs008").createOrReplaceTempView("pacs008")
+            spark.read.format("hudi").load(f"{WAREHOUSE_ROOT}/gold/pacs008").createOrReplaceTempView("pacs008")
         else:
             print("pacs008 path does not exist")
 
