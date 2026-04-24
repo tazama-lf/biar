@@ -98,7 +98,7 @@ A TypeScript cron-based job that processes unstructured documents:
 1. Fetches unprocessed documents from CouchDB
 2. Decrypts AES-256-GCM encrypted attachments
 3. Extracts text and metadata via Apache Tika
-4. Indexes content in Solr (truncated to 30 KB for search)
+4. Indexes content in Solr
 5. Forwards full content to NiFi for downstream processing
 
 Supports files up to 50 MB with automatic retry and status tracking.
