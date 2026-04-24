@@ -17,11 +17,11 @@ c.Spawner.start_timeout = 120
 c.Spawner.environment = {
     "SPARK_HOME": os.environ.get("SPARK_HOME", "/opt/spark"),
     "JAVA_HOME": os.environ.get("JAVA_HOME", "/opt/java"),
-    "SPARK_JARS": os.environ.get("SPARK_JARS", ""),
+    "SPARK_JARS": os.environ.get("SPARK_JARS", "/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar"),
     "S3A_ENDPOINT": os.environ.get("S3A_ENDPOINT", ""),
     "S3A_ACCESS_KEY": os.environ.get("S3A_ACCESS_KEY", ""),
     "S3A_SECRET_KEY": os.environ.get("S3A_SECRET_KEY", ""),
-    "WAREHOUSE_ROOT": os.environ.get("WAREHOUSE_ROOT", "/opt/Tazama_Hudi_warehouse"),
+    "WAREHOUSE_ROOT": os.environ.get("WAREHOUSE_ROOT", "/opt/Tazama_Warehouse"),
     "SPARK_DRIVER_MEMORY": os.environ.get("SPARK_DRIVER_MEMORY", "4g"),
     "PYSPARK_PYTHON": "python3",
     "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
