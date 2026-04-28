@@ -115,7 +115,7 @@ def hudi_opts(table_name: str, record_key: str, precombine: str, partition: str 
         opts.update({
             "hoodie.datasource.write.partitionpath.field": partition,
             "hoodie.datasource.write.keygenerator.class": "org.apache.hudi.keygen.NonpartitionedKeyGenerator",
-            "hoodie.datasource.write.hive_style_partitioning": "false",
+            "hoodie.datasource.write.hive_style_partitioning": "true",
         })
     else:
         opts["hoodie.datasource.write.keygenerator.class"] = "org.apache.hudi.keygen.NonpartitionedKeyGenerator"
@@ -3018,7 +3018,7 @@ def create_alert_navigator_views(spark, WAREHOUSE_ROOT: str) -> str:
             F.col("alert_data_obj.status").alias("alert_status"),
             F.col("created_at_ts").cast("timestamp").alias("ingested_at_ts"),
             F.col("source_file_path").alias("source_file_path"),
-            F.col("record_hash").alias("record_hash"),
+            F.lit("").alias("record_hash"),
         )
     )
 
