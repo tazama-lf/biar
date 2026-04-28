@@ -3018,7 +3018,7 @@ def create_alert_navigator_views(spark, WAREHOUSE_ROOT: str) -> str:
             F.col("alert_data_obj.status").alias("alert_status"),
             F.col("created_at_ts").cast("timestamp").alias("ingested_at_ts"),
             F.col("source_file_path").alias("source_file_path"),
-            F.col("record_hash").alias("record_hash"),
+            F.lit("").alias("record_hash"),
         )
     )
 
