@@ -1,4 +1,4 @@
-# BIAR — Business Intelligence & Analytics Repository
+# BIAR — Business Intelligence, Analytics and Reporting
 
 BIAR is a data lakehouse and document processing platform that provides end-to-end capabilities for data ingestion, ETL processing, storage, querying, and interactive analysis. It is designed to work within the Tazama fraud management ecosystem.
 
