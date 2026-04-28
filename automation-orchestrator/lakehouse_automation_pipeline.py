@@ -115,7 +115,7 @@ def hudi_opts(table_name: str, record_key: str, precombine: str, partition: str 
         opts.update({
             "hoodie.datasource.write.partitionpath.field": partition,
             "hoodie.datasource.write.keygenerator.class": "org.apache.hudi.keygen.NonpartitionedKeyGenerator",
-            "hoodie.datasource.write.hive_style_partitioning": "true",
+            "hoodie.datasource.write.hive_style_partitioning": "false",
         })
     else:
         opts["hoodie.datasource.write.keygenerator.class"] = "org.apache.hudi.keygen.NonpartitionedKeyGenerator"
