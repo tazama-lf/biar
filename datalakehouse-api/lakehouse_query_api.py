@@ -27,6 +27,8 @@ project_path = os.getcwd()
 spark_path = os.getenv("SPARK_HOME", f"{project_path}/spark-3.4.2-bin-hadoop3")
 os.environ["SPARK_HOME"] = spark_path
 os.environ["PATH"] = f"{spark_path}/bin:{os.environ['PATH']}"
+
+
 findspark.init(spark_path)
 
 _spark_lock = threading.Lock()
@@ -63,6 +65,7 @@ def _build_spark() -> SparkSession:
         )
     return builder.getOrCreate()
 
+
 def get_spark() -> SparkSession:
     global _spark
     with _spark_lock:
@@ -97,6 +100,7 @@ SPARK_JOB_TIMEOUT = 120
 # PATHS
 # ---------------------------
 WAREHOUSE_ROOT = os.getenv("WAREHOUSE_ROOT", "/opt/Tazama_Warehouse")
+
 
 alerts_bronze_path      = f"{WAREHOUSE_ROOT}/bronze/alerts"
 alerts_silver_path      = f"{WAREHOUSE_ROOT}/silver/alerts"

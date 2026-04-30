@@ -244,7 +244,7 @@ def etl_alerts(spark, WAREHOUSE_ROOT, source_path=str):
         .withColumn("alert_thresholds", F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.workflow.alertThreshold as int))"))
         .withColumn("interdiction_thresholds", F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.workflow.interdictionThreshold as int))"))
         .withColumn("rule_count_total", F.expr("aggregate(alert_data_obj.tadpResult.typologyResult, 0, (acc, x) -> acc + size(x.ruleResults))"))
-        # rule_pairs logic (full original)
+        # rule_pairs logic (full original) 
         .withColumn("rule_pairs", F.flatten(F.expr("""transform(alert_data_obj.tadpResult.typologyResult, t -> transform(t.ruleResults, r -> named_struct('rule_id', r.id, 'weight', cast(r.wght as long))))""")))
         .withColumn("rule_pairs", F.expr("""aggregate(rule_pairs, cast(array() as array<struct<rule_id:string, weight:bigint>>), (acc, x) -> IF(array_contains(transform(acc, y -> y.rule_id), x.rule_id), acc, concat(acc, array(x))))"""))
         .withColumn("rule_pairs", F.expr("filter(rule_pairs, x -> x.rule_id is not null)"))
