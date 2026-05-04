@@ -13,7 +13,7 @@
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │  PostgreSQL  (10.10.80.16:15432)                                    │
 │                                                                     │
@@ -171,7 +171,7 @@ ETL function: `etl_account_holder()`
 
 ### Field lineage summary (`account_holder`)
 
-```
+```text
 event_history.account_holder
   tenantid       ──rename──▶  tenant_id      (Silver → Gold)
   credttm        ──parse──▶   event_ts        (Silver → Gold)
@@ -264,7 +264,7 @@ The silver layer for `account` is currently a **structural pass-through** with a
 
 ### Field lineage summary (`account`)
 
-```
+```text
 event_history.account
   id             ──rename──▶  account_id     (Bronze → Silver → Gold)
   tenantid       ──rename──▶  tenant_id      (Bronze → Silver → Gold)
@@ -421,7 +421,7 @@ The `DataCache` block is **not** a standard ISO 20022 field. It is produced by t
 
 ### Field lineage summary (`transaction`)
 
-```
+```text
 event_history.transaction
   txtp           ──via feed join (legacy mode only)──▶  tx_type      (Silver → Gold)
   credttm        ──watermark / legacy source of createdAt
@@ -483,7 +483,7 @@ This is the TMS/rules-engine evaluation result table. For each payment processed
 | `DataCache.intrBkSttlmAmt.amt` | Interbank settlement amount |
 | `DataCache.intrBkSttlmAmt.ccy` | Interbank settlement currency |
 
-> **Note**: `evaluation.evaluation` is the **only** table where DataCache fields are persisted to disk. The raw pacs messages in `raw_history` (pacs008, pacs002) do not contain DataCache.
+> **Note (current behavior)**: `evaluation.evaluation` is the canonical business source for DataCache. The TMS also writes DataCache back into `raw_history.pacs002` before storage, so `etl_pacs002()` correctly reads DataCache from `doc.DataCache.*` in the pacs.002 Ozone files. Only records processed end-to-end by the TMS will have populated `DataCache`; earlier or synthetic records will have null `dc_*` fields.
 
 ### Ozone → Lakehouse
 
@@ -501,7 +501,7 @@ There is no `etl_evaluation()` function. The raw JSON files land in Ozone but ar
 
 Once `etl_evaluation()` is implemented, the DataCache fields should flow as:
 
-```
+```text
 evaluation.evaluation
   DataCache.cdtrAcctId  ──ETL──▶ bronze/evaluation ──▶ silver/evaluation ──▶ gold/evaluation
   DataCache.dbtrAcctId                                                              │
@@ -514,11 +514,11 @@ evaluation.evaluation
                        ──JOIN (evaluationID)───────────▶ gold/alerts (evaluation_id)
 ```
 
-The `gold/pacs002` `dc_*` columns should be populated by joining evaluation gold to pacs002 silver on `end_to_end_id + tenant_id`, rather than reading DataCache from the pacs document itself.
+**Current state**: `gold/pacs002` `dc_*` columns are populated by `etl_pacs002()` reading DataCache from the pacs.002 Ozone document (`doc.DataCache.*`). **Intended future state**: once `etl_evaluation()` is implemented, `dc_*` fields could alternatively be sourced by joining `gold/evaluation` to `gold/pacs002` on `end_to_end_id + tenant_id`.
 
 ### Field lineage summary (`evaluation`)
 
-```
+```text
 evaluation.evaluation
   DataCache.cdtrAcctId  ──(intended)──▶ gold/pacs002.dc_cdtr_acct_id
                                      └──▶ gold/account.account_id (join key)
@@ -549,7 +549,7 @@ evaluation.evaluation
 
 ## Cross-Table Dependencies at Gold Layer
 
-```
+```text
 gold/transactions
     ├── derives transactionData from: bronze/pacs008 (pacs.008.001.10 ISO 20022 payload)
     └── derives transactionData from: bronze/pacs002 (pacs.002.001.12 ISO 20022 payload)
