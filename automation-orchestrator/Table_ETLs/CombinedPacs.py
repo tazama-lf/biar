@@ -144,10 +144,7 @@ class CombinedPacsETL(BaseETL):
         if pacs008_recent and pacs002_recent:
             print("* pacs008 + pacs002 GOLD complete → triggering etl_transactions")
 
-            bucket = self._parse_s3a_bucket(source_path)
-            if not bucket:
-                raise ValueError(f"Unable to parse bucket from source_path: {source_path}")
-
+            
             trigger_lock = os.path.join(self.state_dir, "transactions_trigger.lock")
             os.makedirs(self.state_dir, exist_ok=True)
 
@@ -161,9 +158,9 @@ class CombinedPacsETL(BaseETL):
 
             transactions_ok = False
             try:
-                transaction_source_path = f"s3a://{bucket}/transaction/"
+                
                 TransactionsETL(self.spark, self.warehouse_root).run(
-                    transaction_source_path, mode="from_pacs"
+                    source_path, mode="from_pacs"
                 )
                 transactions_ok = True
                 print("* Combined PACs + Transactions pipeline completed")

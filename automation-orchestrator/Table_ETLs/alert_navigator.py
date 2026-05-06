@@ -308,17 +308,21 @@ class AlertNavigatorETL(BaseETL):
         )
 
         network_eval = (
-            alerts_nav_header.select("alert_id", "tenant_id", "tx_type")
+            alerts_nav_header.select(
+                F.col("alert_id"),
+                F.col("tenant_id").alias("header_tenant_id"),
+                F.col("tx_type").alias("header_tx_type"),
+            )
             .join(
                 net_parsed,
-                (alerts_nav_header.tenant_id == net_parsed.tenant_id)
-                & (alerts_nav_header.tx_type == net_parsed.network_tx_type),
+                (F.col("header_tenant_id") == net_parsed.tenant_id)
+                & (F.col("header_tx_type") == net_parsed.network_tx_type),
                 "left",
             )
             .select(
                 "alert_id",
                 net_parsed.tenant_id,
-                "tx_type",
+                F.col("header_tx_type").alias("tx_type"),
                 "network_cfg",
                 "network_active",
                 "network_message_id",

@@ -22,16 +22,7 @@ class AccountETL(BaseETL):
         return f"{self.warehouse_root}/gold/account"
  
     def bronze(self, source_path: str) -> str:
-        if source_path.lower().endswith(".json"):
-            df = self.spark.read.json(source_path)
-        else:
-            df = (
-                self.spark.read
-                .option("header", True)
-                .option("escape", '"')
-                .option("multiLine", True)
-                .csv(source_path)
-            )
+        df = self.spark.read.json(source_path)
  
         bronze = (
             df

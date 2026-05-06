@@ -158,22 +158,9 @@ class Pacs008ETL(BaseETL):
         s = s.withColumn("tx_tenant_id", F.coalesce(F.col("tx_tenant_id"), F.col("tenant_id").cast("string")))
         s = s.withColumn("event_ts",     F.coalesce(F.col("event_ts"), F.col("credttm_ts").cast("timestamp")))
 
-        gold_pk = F.sha2(
-            F.concat_ws(
-                "||",
-                F.lit("gold_pacs008"),
-                F.coalesce(F.col("tenant_id"),    F.lit("")),
-                F.coalesce(F.col("message_id"),   F.lit("")),
-                F.coalesce(F.col("end_to_end_id"), F.lit("")),
-                F.coalesce(F.col("record_hash"),  F.lit("")),
-            ),
-            256,
-        )
-
         gold = (
-            s.withColumn("pk", gold_pk)
+            s
             .select(
-                "pk",
                 F.col("tenant_id").cast("string"),
                 F.col("message_id").cast("string"),
                 F.col("end_to_end_id").cast("string"),

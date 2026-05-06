@@ -184,7 +184,10 @@ class AlertHistoryViewETL(BaseETL):
             allowMissingColumns=True,
         )
 
-        return acct_stream.unionByName(cp_stream, allowMissingColumns=True)
+        return (
+            acct_stream.unionByName(cp_stream, allowMissingColumns=True)
+            .dropDuplicates(["alert_id", "entity_type", "entity_id"])
+        )
 
     def _bucket_agg(self, df: DataFrame, granularity: str) -> DataFrame:
         """Aggregate entity events into a single time bucket."""

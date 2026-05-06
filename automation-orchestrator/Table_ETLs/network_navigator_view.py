@@ -40,6 +40,16 @@ class NetworkNavigatorViewETL(BaseETL):
     # INTERNAL HELPERS
     # ------------------------------------------------------------------
 
+    def _safe_load(self, path: str, select_expr: list | None = None) -> DataFrame | None:
+        """Attempt to load a Hudi table; return None if it does not exist."""
+        try:
+            df = self.spark.read.format("hudi").load(path)
+            if select_expr:
+                df = df.select(*select_expr)
+            return df
+        except Exception:
+            return None
+
     def _load_flags(self) -> DataFrame:
         """Load bronze transactions + gold alerts/cases/tasks, return flagged base frame."""
         tx = self.spark.read.format("hudi").load(self.transactions_bronze_path)
@@ -120,46 +130,71 @@ class NetworkNavigatorViewETL(BaseETL):
             .filter(F.col("event_ts").isNotNull())
         )
 
-        # Join flags
-        alerts_g = (
-            self.spark.read.format("hudi")
-            .load(f"{self.warehouse_root}/gold/alerts")
-            .select(
+        # ------------------------------------------------------------------
+        # Join flags — optional upstream tables
+        # ------------------------------------------------------------------
+        alerts_g = self._safe_load(
+            f"{self.warehouse_root}/gold/alerts",
+            select_expr=[
                 F.col("tx_msg_id").cast("string").alias("tx_msg_id"),
                 F.col("alert_id").cast("long").alias("alert_id"),
                 F.col("case_id").cast("long").alias("case_id"),
-            )
-            .dropna(subset=["tx_msg_id"])
-            .dropDuplicates(["tx_msg_id"])
+            ],
         )
+        if alerts_g is not None:
+            alerts_g = alerts_g.dropna(subset=["tx_msg_id"]).dropDuplicates(["tx_msg_id"])
 
-        cases_g = (
-            self.spark.read.format("hudi")
-            .load(f"{self.warehouse_root}/gold/cases")
-            .select(
-                F.col("case_id").cast("long").alias("case_id"),
-                F.col("status").cast("string").alias("case_status"),
-            )
-            .dropDuplicates(["case_id"])
-        )
+        cases_g = self._safe_load(f"{self.warehouse_root}/gold/cases")
+        if cases_g is not None:
+            if "status" in cases_g.columns:
+                cases_g = cases_g.select(
+                    F.col("case_id").cast("long").alias("case_id"),
+                    F.col("status").cast("string").alias("case_status"),
+                )
+            else:
+                cases_g = cases_g.select(
+                    F.col("case_id").cast("long").alias("case_id"),
+                    F.lit(None).cast("string").alias("case_status"),
+                )
+            cases_g = cases_g.dropDuplicates(["case_id"])
 
-        tasks_g = (
-            self.spark.read.format("hudi")
-            .load(f"{self.warehouse_root}/gold/tasks")
-            .select(
+        tasks_g = self._safe_load(
+            f"{self.warehouse_root}/gold/tasks",
+            select_expr=[
                 F.col("case_id").cast("long").alias("case_id"),
                 F.col("is_completed").cast("int").alias("is_completed"),
-            )
-        )
-        tasks_agg = tasks_g.groupBy("case_id").agg(
-            F.max("is_completed").alias("has_completed_task")
+            ],
         )
 
+        flags = base
+        if alerts_g is not None:
+            flags = flags.join(alerts_g, "tx_msg_id", "left")
+        else:
+            # Ensure these columns exist for downstream joins & expressions
+            flags = flags.withColumn("alert_id", F.lit(None).cast("long"))
+            flags = flags.withColumn("case_id", F.lit(None).cast("long"))
+
+        if cases_g is not None:
+            flags = flags.join(cases_g, "case_id", "left")
+
+        if tasks_g is not None:
+            tasks_agg = tasks_g.groupBy("case_id").agg(
+                F.max("is_completed").alias("has_completed_task")
+            )
+            flags = flags.join(tasks_agg, "case_id", "left")
+
+        # ------------------------------------------------------------------
+        # Guards: ensure columns exist even when upstream tables were missing
+        # ------------------------------------------------------------------
+        if "alert_id" not in flags.columns:
+            flags = flags.withColumn("alert_id", F.lit(None).cast("long"))
+        if "case_status" not in flags.columns:
+            flags = flags.withColumn("case_status", F.lit(None).cast("string"))
+        if "has_completed_task" not in flags.columns:
+            flags = flags.withColumn("has_completed_task", F.lit(0).cast("int"))
+
         return (
-            base.join(alerts_g, "tx_msg_id", "left")
-            .join(cases_g, "case_id", "left")
-            .join(tasks_agg, "case_id", "left")
-            .withColumn(
+            flags.withColumn(
                 "is_alerted_tx",
                 F.when(F.col("alert_id").isNotNull(), F.lit(1)).otherwise(F.lit(0)),
             )

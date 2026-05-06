@@ -65,13 +65,25 @@ class TypologiesETL(BaseETL):
             .withColumn("interdiction_threshold", F.col("typology_obj.workflow.interdictionThreshold").cast("int"))
             .withColumn("rule_count",          F.size(F.col("typology_obj.rules")).cast("int"))
             .withColumn("expression_count",    F.size(F.col("typology_obj.expression")).cast("int"))
+            .withColumn(
+                "pk",
+                F.sha2(
+                    F.concat_ws(
+                        "||",
+                        F.coalesce(F.col("tenant_id"), F.lit("")),
+                        F.coalesce(F.col("typology_id"), F.lit("")),
+                        F.coalesce(F.col("typology_cfg"), F.lit("")),
+                    ),
+                    256,
+                ),
+            )
             .withColumn("_row_payload_json",   F.to_json(F.struct("*")))
         )
  
         w = Window.partitionBy("tenant_id", "typology_id", "typology_cfg").orderBy(F.col("ingested_at_ts").desc_nulls_last())
         silver = silver.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
  
-        self.write_hudi(silver, self.silver_path, self.hudi_opts("silver_typologies", "record_hash", "ingested_at_ts"))
+        self.write_hudi(silver, self.silver_path, self.hudi_opts("silver_typologies", "pk", "ingested_at_ts"))
         print(f"[TypologiesETL] Silver written → {self.silver_path}")
         return self.silver_path
  

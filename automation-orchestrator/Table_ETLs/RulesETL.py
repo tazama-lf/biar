@@ -171,7 +171,33 @@ class RulesETL(BaseETL):
                 F.element_at(F.col("exits_arr"), i).getField("subRuleRef").cast("string").alias(f"{p}_sub_rule_ref"),
             ]
  
-        gold_rules = g.select(*(base_cols + band_cols + exit_cols))
+        # ------------------------------------------------------------------
+        # Overflow guards: JSON-serialize anything beyond the fixed-width projection
+        # so band_count / exit_condition_count remain truthful and data is not lost.
+        # ------------------------------------------------------------------
+        bands_overflow = F.when(
+            F.size(F.col("bands_arr")) > _MAX_BANDS,
+            F.to_json(
+                F.slice(
+                    F.col("bands_arr"),
+                    _MAX_BANDS + 1,
+                    F.size(F.col("bands_arr")) - _MAX_BANDS,
+                )
+            ),
+        ).otherwise(F.lit(None).cast("string")).alias("bands_overflow_json")
+ 
+        exits_overflow = F.when(
+            F.size(F.col("exits_arr")) > _MAX_EXITS,
+            F.to_json(
+                F.slice(
+                    F.col("exits_arr"),
+                    _MAX_EXITS + 1,
+                    F.size(F.col("exits_arr")) - _MAX_EXITS,
+                )
+            ),
+        ).otherwise(F.lit(None).cast("string")).alias("exits_overflow_json")
+ 
+        gold_rules = g.select(*(base_cols + band_cols + exit_cols + [bands_overflow, exits_overflow]))
  
         bad = [c for c, t in gold_rules.dtypes if t.startswith(("array", "struct"))]
         if bad:

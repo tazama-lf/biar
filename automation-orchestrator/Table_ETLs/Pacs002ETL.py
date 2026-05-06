@@ -174,21 +174,9 @@ class Pacs002ETL(BaseETL):
         tx_ccy          = F.col("dc_instd_ccy").cast("string")
         event_to_ingest = ((F.col("ingested_at_ts").cast("double") - F.col("event_ts").cast("double")) * 1000.0)
 
-        gold_pk = F.sha2(
-            F.concat_ws(
-                "||",
-                F.lit("gold_pacs002"),
-                F.coalesce(F.col("tenant_id"),    F.lit("")),
-                F.coalesce(tx_msg_id,             F.lit("")),
-                F.coalesce(F.col("end_to_end_id"), F.lit("")),
-                F.coalesce(F.col("record_hash"),  F.lit("")),
-            ),
-            256,
-        )
 
         gold = (
             s
-            .withColumn("pk",                 gold_pk)
             .withColumn("tx_msg_id",          tx_msg_id)
             .withColumn("tx_event_ts",        tx_event_ts)
             .withColumn("tx_amount",          tx_amount)
@@ -196,7 +184,7 @@ class Pacs002ETL(BaseETL):
             .withColumn("event_to_ingest_ms", event_to_ingest.cast("long"))
             .withColumn("event_date",         F.to_date(F.col("event_ts")))
             .select(
-                "pk", "tenant_id", "message_id", "end_to_end_id",
+                "tenant_id", "message_id", "end_to_end_id",
                 "credttm_raw", "credttm_ts",
                 "tx_type", "tx_msg_id", "tx_status",
                 "tx_amount", "tx_ccy",

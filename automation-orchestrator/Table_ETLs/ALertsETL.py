@@ -93,7 +93,7 @@ class AlertsETL(BaseETL):
     def silver(self) -> str:
         """Parse nested JSON blobs, apply DQ rules, write silver + DLQ."""
         bronze = self.spark.read.format("hudi").load(self.bronze_path)
-        bronze = self.drop_hoodie_cols(bronze)
+        
 
         alert_schema = self.infer_json_schema(bronze, "alert_data")
         tx_schema    = self.infer_json_schema(bronze, "transaction")
@@ -111,6 +111,7 @@ class AlertsETL(BaseETL):
         )
 
         silver = self._flatten_silver(b)
+        bronze = self.drop_hoodie_cols(bronze)
 
         # Deduplicate – keep latest per alert_id
         w = Window.partitionBy("alert_id").orderBy(F.col("created_at_ts").desc())
@@ -132,6 +133,12 @@ class AlertsETL(BaseETL):
                 ),
             )
             .withColumn("dlq_ingested_at", F.current_timestamp())
+        )
+
+        self.write_hudi(
+            silver_fail,
+            self.dlq_path,
+            self.hudi_opts("silver_alerts_dlq", "dlq_id", "dlq_ingested_at"),
         )
 
         self.write_hudi(
