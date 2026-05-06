@@ -1,4 +1,4 @@
-fastapi
-uvicorn
-pandas
+fastapi==0.128.8
+uvicorn[standard]==0.39.0
+pandas==2.3.3
 pyspark==3.4.2

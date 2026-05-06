@@ -377,16 +377,16 @@ class AlertNavigatorETL(BaseETL):
         b_typ = self._safe_load(typologies_bronze_path)
         if b_typ is not None:
             b_typ = b_typ.select(
-                F.col("tenantid").alias("cfg_tenant_id"),
-                F.col("typologyid").alias("cfg_typology_id"),
-                F.col("typologycfg").alias("cfg_typology_cfg"),
+                F.col("tenant_id").alias("cfg_tenant_id"),
+                F.col("typology_id").alias("cfg_typology_id"),
+                F.col("typology_cfg").alias("cfg_typology_cfg"),
                 F.col("configuration").alias("typology_configuration_json"),
             )
 
         b_net = self._safe_load(network_map_bronze_path)
         if b_net is not None:
             b_net = b_net.select(
-                F.col("tenantid").alias("cfg_tenant_id"),
+                F.col("tenant_id").alias("cfg_tenant_id"),
                 F.col("configuration").alias("network_configuration_json"),
             )
 

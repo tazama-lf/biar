@@ -58,7 +58,7 @@ class TypologiesETL(BaseETL):
             .withColumn("typology_obj",       F.from_json(F.col("configuration_json"), typ_schema))
             .withColumn("typology_id_in_json", F.col("typology_obj.id"))
             .withColumn("typology_cfg_in_json", F.col("typology_obj.cfg"))
-            .withColumn("typology_desc",       F.col("typology_obj").getField("desc"))
+            #.withColumn("typology_desc",       F.col("typology_obj").getField("desc"))
             .withColumn("typology_name",       F.col("typology_obj.typology_name"))
             .withColumn("flow_processor",      F.col("typology_obj.workflow.flowProcessor"))
             .withColumn("alert_threshold",     F.col("typology_obj.workflow.alertThreshold").cast("int"))

@@ -1,14 +1,3 @@
-"""
-transaction_history_view.py
----------------------------
-Builds vw_transaction_history from bronze/transactions.
-Parses pacs.008 + pacs.002, joins alerts/cases/tasks for flags,
-expands to entity level, and produces EVENT + aggregated rows.
-
-Carries forward the composite primary key transaction_pk
-(TxTp || "||" || endToEndId) from TransactionsETL as the sole primary key.
-"""
-
 from __future__ import annotations
 
 from pyspark.sql import DataFrame
@@ -165,14 +154,21 @@ class TransactionHistoryViewETL(BaseETL):
         if alerts_g is not None:
             alerts_g = alerts_g.dropna(subset=["tx_msg_id"]).dropDuplicates(["tx_msg_id"])
 
-        cases_g = self._safe_load(
-            f"{self.warehouse_root}/gold/cases",
-            select_expr=[
-                F.col("case_id").cast("long").alias("case_id"),
-                F.col("status").cast("string").alias("case_status"),
-            ],
-        )
+        # ------------------------------------------------------------------
+        # CASES — status column is optional
+        # ------------------------------------------------------------------
+        cases_g = self._safe_load(f"{self.warehouse_root}/gold/cases")
         if cases_g is not None:
+            if "status" in cases_g.columns:
+                cases_g = cases_g.select(
+                    F.col("case_id").cast("long").alias("case_id"),
+                    F.col("status").cast("string").alias("case_status"),
+                )
+            else:
+                cases_g = cases_g.select(
+                    F.col("case_id").cast("long").alias("case_id"),
+                    F.lit(None).cast("string").alias("case_status"),
+                )
             cases_g = cases_g.dropDuplicates(["case_id"])
 
         tasks_g = self._safe_load(
@@ -193,6 +189,16 @@ class TransactionHistoryViewETL(BaseETL):
                 F.max("is_completed").alias("has_completed_task")
             )
             flags = flags.join(tasks_agg, "case_id", "left")
+
+        # ------------------------------------------------------------------
+        # Guard: ensure these columns exist even when the table was missing
+        # ------------------------------------------------------------------
+        if "alert_id" not in flags.columns:
+            flags = flags.withColumn("alert_id", F.lit(None).cast("long"))
+        if "case_status" not in flags.columns:
+            flags = flags.withColumn("case_status", F.lit(None).cast("string"))
+        if "has_completed_task" not in flags.columns:
+            flags = flags.withColumn("has_completed_task", F.lit(0).cast("int"))
 
         return (
             flags.withColumn(
@@ -289,37 +295,54 @@ class TransactionHistoryViewETL(BaseETL):
         )
 
     def _build_agg(self, df: DataFrame, granularity: str) -> DataFrame:
-        """Roll up entity rows to a given time granularity."""
+        """Roll up entity rows to a given time granularity with deterministic PK."""
         bucket_start = F.date_trunc(granularity, F.col("event_ts"))
+
         return (
             df.withColumn("bucket_start", bucket_start)
-            .groupBy("entity_type", "entity_role", "entity_id", "bucket_start")
-            .agg(
-                F.count("*").cast("long").alias("bucket_tx_count"),
-                F.sum(F.coalesce(F.col("tx_amount"), F.lit(0.0)))
+        .groupBy("entity_type", "entity_role", "entity_id", "bucket_start")
+        .agg(
+            F.count("*").cast("long").alias("bucket_tx_count"),
+            F.sum(F.coalesce(F.col("tx_amount"), F.lit(0.0)))
                 .cast("double")
                 .alias("bucket_tx_amount"),
-                F.max("event_date").alias("event_date"),
-                F.max("tenant_id").alias("tenant_id"),
-            )
-            .withColumn("row_type", F.lit("AGG"))
-            .withColumn("bucket_granularity", F.lit(granularity))
-            .withColumn("recent_rank_desc", F.lit(None).cast("int"))
-            .withColumn("cum_tx_count", F.lit(None).cast("long"))
-            .withColumn("cum_tx_amount", F.lit(None).cast("double"))
-            .withColumn("transaction_pk", F.lit(None).cast("string"))
-            .withColumn("end_to_end_id", F.lit(None).cast("string"))
-            .withColumn("tx_type", F.lit(None).cast("string"))
-            .withColumn("tx_msg_id", F.lit(None).cast("string"))
-            .withColumn("event_ts", F.lit(None).cast("timestamp"))
-            .withColumn("tx_amount", F.lit(None).cast("double"))
-            .withColumn("tx_ccy", F.lit(None).cast("string"))
-            .withColumn("entity_name", F.lit(None).cast("string"))
-            .withColumn("is_alerted", F.lit(None).cast("int"))
-            .withColumn("is_investigated", F.lit(None).cast("int"))
-            .withColumn("source_file_path", F.lit(None).cast("string"))
-            .withColumn("record_hash", F.lit(None).cast("string"))
+            F.max("event_date").alias("event_date"),
+            F.max("tenant_id").alias("tenant_id"),
         )
+        .withColumn("row_type", F.lit("AGG"))
+        .withColumn("bucket_granularity", F.lit(granularity))
+
+        .withColumn(
+            "transaction_pk",
+            F.concat_ws(
+                 "||",
+                F.lit("AGG"),
+                F.col("entity_type"),
+                F.col("entity_role"),
+                F.col("entity_id"),
+                F.col("bucket_granularity"),
+                F.col("bucket_start").cast("string"),
+            ),
+        )
+
+        # -------------------------------------------------------------
+        # Remaining columns (unchanged)
+        # -------------------------------------------------------------
+        .withColumn("recent_rank_desc", F.lit(None).cast("int"))
+        .withColumn("cum_tx_count", F.lit(None).cast("long"))
+        .withColumn("cum_tx_amount", F.lit(None).cast("double"))
+        .withColumn("end_to_end_id", F.lit(None).cast("string"))
+        .withColumn("tx_type", F.lit(None).cast("string"))
+        .withColumn("tx_msg_id", F.lit(None).cast("string"))
+        .withColumn("event_ts", F.lit(None).cast("timestamp"))
+        .withColumn("tx_amount", F.lit(None).cast("double"))
+        .withColumn("tx_ccy", F.lit(None).cast("string"))
+        .withColumn("entity_name", F.lit(None).cast("string"))
+        .withColumn("is_alerted", F.lit(None).cast("int"))
+        .withColumn("is_investigated", F.lit(None).cast("int"))
+        .withColumn("source_file_path", F.lit(None).cast("string"))
+        .withColumn("record_hash", F.lit(None).cast("string"))
+    )
 
     def _add_pk(self, df: DataFrame) -> DataFrame:
         """Add ingestion timestamp. transaction_pk is carried forward as-is."""

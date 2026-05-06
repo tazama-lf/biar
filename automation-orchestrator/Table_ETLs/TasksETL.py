@@ -62,9 +62,9 @@ class TasksETL(BaseETL):
     def silver_path(self) -> str:
         return f"{self.warehouse_root}/silver/tasks"
 
-    @property
-    def silver_dlq_path(self) -> str:
-        return f"{self.warehouse_root}/silver/tasks_dlq"
+    # @property
+    # def silver_dlq_path(self) -> str:
+    #     return f"{self.warehouse_root}/silver/tasks_dlq"
 
     @property
     def gold_path(self) -> str:
@@ -174,22 +174,21 @@ class TasksETL(BaseETL):
         silver = silver.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
 
         # DQ split
-        silver_pass, silver_fail = self._apply_dq(silver)
+        #silver_pass, silver_fail = self._apply_dq(silver)
 
-        silver_fail = (
-            silver_fail
-            .withColumn(
-                "dlq_id",
-                F.sha2(
-                    F.coalesce(F.col("record_hash").cast("string"), F.col("_row_payload_json").cast("string")),
-                    256,
-                ),
-            )
-            .withColumn("dlq_ingested_at", F.current_timestamp())
-        )
+        # silver_fail = (
+        #     silver_fail
+        #     .withColumn(
+        #         "dlq_id",
+        #         F.sha2(
+        #             F.coalesce(F.col("record_hash").cast("string"), F.col("_row_payload_json").cast("string")),
+        #             256,
+        #         ),
+        #     )
+        #     .withColumn("dlq_ingested_at", F.current_timestamp())
+        # )
 
-        self.write_hudi(silver_pass, self.silver_path, self.hudi_opts("tasks", "task_id", "created_at_ts"))
-        self.write_hudi(silver_fail, self.silver_dlq_path, self.hudi_opts("silver_tasks_dlq", "dlq_id", "dlq_ingested_at"))
+        self.write_hudi(silver, self.silver_path, self.hudi_opts("tasks", "task_id", "created_at_ts"))
         print(f"[TasksETL] Silver + DLQ written → {self.silver_path}")
         return self.silver_path
 

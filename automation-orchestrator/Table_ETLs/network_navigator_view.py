@@ -1,12 +1,3 @@
-"""
-network_navigator_view.py
--------------------------
-Builds 3 Network Navigator Hudi views from bronze/transactions:
-  1. vw_tx_network_accounts_edges       → Account-to-Account edges
-  2. vw_tx_network_counterparties_edges → Counterparty-to-Counterparty edges
-  3. vw_counterparty_account_links      → Counterparty owns Account edges
-"""
-
 from __future__ import annotations
 
 from pyspark.sql import DataFrame
@@ -57,7 +48,7 @@ class NetworkNavigatorViewETL(BaseETL):
         rename_map = {
             "endToEndId": "end_to_end_id",
             "tenantId": "tenant_id",
-            #"transactionId": "transaction_id",
+            "transaction_pk": "transaction_pk",
         }
         for src, dst in rename_map.items():
             if src in tx.columns and dst not in tx.columns:
@@ -112,7 +103,7 @@ class NetworkNavigatorViewETL(BaseETL):
             .withColumn("dbtr_account_id", dbtr_acct)
             .withColumn("cdtr_account_id", cdtr_acct)
             .select(
-                #F.col("transaction_id").cast("long").alias("transaction_id"),
+                F.col("transaction_pk").cast("long").alias("transaction_pk"),
                 F.col("end_to_end_id").cast("string").alias("end_to_end_id"),
                 F.col("tenant_id").cast("string").alias("tenant_id"),
                 F.col("tx_type").cast("string").alias("tx_type"),
