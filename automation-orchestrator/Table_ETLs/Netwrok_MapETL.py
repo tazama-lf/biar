@@ -47,6 +47,9 @@ class NetworkMapETL(BaseETL):
     def silver(self) -> str:
         bronze_df = self.spark.read.format("hudi").load(self.bronze_path)
         config_schema = self.infer_json_schema(bronze_df, "configuration")
+
+        w = Window.partitionBy("network_map_id").orderBy(F.col("created_at_ts").desc())
+        bronze_df = bronze_df.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
  
         silver = (
             bronze_df
@@ -70,9 +73,6 @@ class NetworkMapETL(BaseETL):
                 "credttm", "upddttm",
             )
         )
- 
-        w = Window.partitionBy("network_map_id").orderBy(F.col("created_at_ts").desc())
-        silver = silver.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
  
         self.write_hudi(silver, self.silver_path, self.hudi_opts("network_map", "network_map_id", "created_at_ts"))
         print(f"[NetworkMapETL] Silver written → {self.silver_path}")
