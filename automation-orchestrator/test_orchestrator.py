@@ -20,12 +20,12 @@ from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
 # New class-based imports — replaces the monolith's function imports:
-#   automation_orchestrator_api        → FullETLOrchestrator.run()
+#   run_full_etl        → FullETLOrchestrator.run()
 #   run_all_views       → ViewsOrchestrator.run()
 #   get_spark_session   → spark_utils.get_spark_session()
 #   DEFAULT_WAREHOUSE_ROOT → derived via _env() below
 # ---------------------------------------------------------------------------
-from lakehouse_automation_pipeline import FullETLOrchestrator, _env
+from run_full_etl import FullETLOrchestrator, _env
 from Table_ETLs.views_orchestrator import ViewsOrchestrator
 
 
@@ -43,7 +43,7 @@ def get_spark_session():
     spark_home = _env("SPARK_HOME", "/opt/spark")
     os.environ["SPARK_HOME"] = spark_home
 
-    spark_master = _env("SPARK_MASTER", "local[2]")
+    spark_master    = _env("SPARK_MASTER",    "local[2]")
     spark_local_dir = _env("SPARK_LOCAL_DIR", "/tmp/spark")
     os.environ.setdefault("SPARK_LOCAL_DIRS", spark_local_dir)
  
@@ -55,7 +55,7 @@ def get_spark_session():
     jars_env  = _env("SPARK_JARS", ",".join(default_jars))
     jar_files = [j.strip() for j in jars_env.split(",") if j.strip()]
 
-    s3_endpoint = _env("S3A_ENDPOINT", "")
+    s3_endpoint   = _env("S3A_ENDPOINT",   "")
     s3_access_key = _env("S3A_ACCESS_KEY", "")
     s3_secret_key = _env("S3A_SECRET_KEY", "")
 
@@ -63,45 +63,45 @@ def get_spark_session():
         SparkSession.builder
         .appName("Tazama_Hudi_ETL")
         .master(spark_master)
-        .config("spark.jars", ",".join(jar_files))
-        .config("spark.driver.extraClassPath", ":".join(jar_files))
-        .config("spark.executor.extraClassPath", ":".join(jar_files))
+        .config("spark.jars",                       ",".join(jar_files))
+        .config("spark.driver.extraClassPath",      ":".join(jar_files))
+        .config("spark.executor.extraClassPath",    ":".join(jar_files))
         # S3A / Ozone
-        .config("spark.hadoop.fs.s3a.endpoint", s3_endpoint)
-        .config("spark.hadoop.fs.s3a.access.key", s3_access_key)
-        .config("spark.hadoop.fs.s3a.secret.key", s3_secret_key)
-        .config("spark.hadoop.fs.s3a.path.style.access", "true")
-        .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
-        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-        .config("spark.hadoop.fs.s3a.impl.disable.cache", "true")
-        .config("spark.hadoop.fs.s3a.connection.maximum", "100")
-        .config("spark.hadoop.fs.s3a.fast.upload", "true")
+        .config("spark.hadoop.fs.s3a.endpoint",                "http://10.10.80.19:9878")
+        .config("spark.hadoop.fs.s3a.access.key",              "tazama")
+        .config("spark.hadoop.fs.s3a.secret.key",              "tazama")
+        .config("spark.hadoop.fs.s3a.path.style.access",       "true")
+        .config("spark.hadoop.fs.s3a.connection.ssl.enabled",  "false")
+        .config("spark.hadoop.fs.s3a.impl",                    "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .config("spark.hadoop.fs.s3a.impl.disable.cache",      "true")
+        .config("spark.hadoop.fs.s3a.connection.maximum",      "100")
+        .config("spark.hadoop.fs.s3a.fast.upload",             "true")
         # Hudi
-        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-        .config("spark.kryo.registrator", "org.apache.spark.HoodieSparkKryoRegistrar")
-        .config("spark.sql.extensions", "org.apache.spark.sql.hudi.HoodieSparkSessionExtension")
+        .config("spark.serializer",          "org.apache.spark.serializer.KryoSerializer")
+        .config("spark.kryo.registrator",    "org.apache.spark.HoodieSparkKryoRegistrar")
+        .config("spark.sql.extensions",      "org.apache.spark.sql.hudi.HoodieSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.hudi.catalog.HoodieCatalog")
         # Memory & performance
-        .config("spark.local.dir", _env("SPARK_LOCAL_DIR", "/tmp/spark"))
-        .config("spark.driver.memory", _env("SPARK_DRIVER_MEMORY", "6g"))
-        .config("spark.driver.memoryOverhead", _env("SPARK_DRIVER_MEMORY_OVERHEAD", "2g"))
-        .config("spark.driver.maxResultSize", _env("SPARK_DRIVER_MAX_RESULT_SIZE", "4g"))
-        .config("spark.executor.memory", _env("SPARK_EXECUTOR_MEMORY", "6g"))
-        .config("spark.executor.memoryOverhead", _env("SPARK_EXECUTOR_MEMORY_OVERHEAD", "2g"))
-        .config("spark.sql.shuffle.partitions", _env("SPARK_SQL_SHUFFLE_PARTITIONS", "48"))
-        .config("spark.default.parallelism", _env("SPARK_DEFAULT_PARALLELISM", "48"))
-        .config("spark.executor.cores", _env("SPARK_EXECUTOR_CORES", "2"))
-        .config("spark.driver.cores", _env("SPARK_DRIVER_CORES", "2"))
-        .config("spark.memory.fraction", _env("SPARK_MEMORY_FRACTION", "0.6"))
-        .config("spark.memory.storageFraction", _env("SPARK_MEMORY_STORAGE_FRACTION", "0.3"))
-        .config("spark.sql.adaptive.enabled", "true")
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", _env("SPARK_SQL_ADVISORY_PARTITION_SIZE", "64mb"))
+        .config("spark.local.dir",                        _env("SPARK_LOCAL_DIR",              "/tmp/spark"))
+        .config("spark.driver.memory",                    _env("SPARK_DRIVER_MEMORY",          "6g"))
+        .config("spark.driver.memoryOverhead",            _env("SPARK_DRIVER_MEMORY_OVERHEAD",  "2g"))
+        .config("spark.driver.maxResultSize",             _env("SPARK_DRIVER_MAX_RESULT_SIZE",  "4g"))
+        .config("spark.executor.memory",                  _env("SPARK_EXECUTOR_MEMORY",         "6g"))
+        .config("spark.executor.memoryOverhead",          _env("SPARK_EXECUTOR_MEMORY_OVERHEAD","2g"))
+        .config("spark.sql.shuffle.partitions",           _env("SPARK_SQL_SHUFFLE_PARTITIONS",  "48"))
+        .config("spark.default.parallelism",              _env("SPARK_DEFAULT_PARALLELISM",     "48"))
+        .config("spark.executor.cores",                   _env("SPARK_EXECUTOR_CORES",          "2"))
+        .config("spark.driver.cores",                     _env("SPARK_DRIVER_CORES",            "2"))
+        .config("spark.memory.fraction",                  _env("SPARK_MEMORY_FRACTION",         "0.6"))
+        .config("spark.memory.storageFraction",           _env("SPARK_MEMORY_STORAGE_FRACTION", "0.3"))
+        .config("spark.sql.adaptive.enabled",                        "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled",     "true")
+        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes",
+                _env("SPARK_SQL_ADVISORY_PARTITION_SIZE", "64mb"))
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY")
-        .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.sql.session.timeZone",        "UTC")
         .getOrCreate()
     )
-
     spark.sparkContext.setLogLevel("WARN")
     print(f"Spark Version: {spark.version}")
     return spark
@@ -111,14 +111,14 @@ def get_spark_session():
 # CONFIGURATION
 # ===================================================================
 
-DEFAULT_WAREHOUSE_ROOT = ("/opt/Tazama_Warehouse")
+DEFAULT_WAREHOUSE_ROOT = _env("WAREHOUSE_ROOT", "/opt/Tazama_Warehouse")
 
 APP_BASE_DIR = _env("APP_BASE_DIR", os.path.dirname(os.path.abspath(__file__)))
-OUT_DIR = _env("OUT_DIR", os.path.join(APP_BASE_DIR, "out"))
+OUT_DIR      = _env("OUT_DIR",      os.path.join(APP_BASE_DIR, "out"))
 
-NOTEBOOK_PATH = os.path.join(APP_BASE_DIR, "Tazama_Data_Lake_House.ipynb")
-OUTPUT_NOTEBOOK = os.path.join(OUT_DIR, "last_run.ipynb")
-OUTPUT_REQUEST = os.path.join(OUT_DIR, "last_request.json")
+NOTEBOOK_PATH     = os.path.join(APP_BASE_DIR, "Tazama_Data_Lake_House.ipynb")
+OUTPUT_NOTEBOOK   = os.path.join(OUT_DIR, "last_run.ipynb")
+OUTPUT_REQUEST    = os.path.join(OUT_DIR, "last_request.json")
 
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "1"))
 
@@ -224,13 +224,13 @@ def run_job(req: TriggerRequest) -> dict:
     Returns the result dict produced by FullETLOrchestrator.run(), whose
     shape is: {table, raw_path, bucket, object_key, source_path, result, views_result}.
     The "result" key carries the status string ("All Done", "Skipped: …") —
-    matching what the original API read from automation_orchestrator_api()'s return value.
+    matching what the original API read from run_full_etl()'s return value.
     """
     print(f"[JOB] Starting ETL for: {req.raw_path}")
 
     spark = GLOBAL_SPARK if GLOBAL_SPARK else get_spark_session()
 
-    # Replaced: automation_orchestrator_api(spark, raw_path, bucket, table, object_key)
+    # Replaced: run_full_etl(spark, raw_path, bucket, table, object_key)
     result = FullETLOrchestrator(spark, DEFAULT_WAREHOUSE_ROOT).run(
         raw_path=req.raw_path,
         bucket=req.bucket,
