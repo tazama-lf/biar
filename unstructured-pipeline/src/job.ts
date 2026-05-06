@@ -88,8 +88,8 @@ class DocumentProcessor {
         if (fileMeta.fileSize > this.config.MAX_FILE_SIZE_MB * BYTES_PER_MB) {
           throw new Error(
             'File too large: ' +
-            Math.round(fileMeta.fileSize / BYTES_PER_MB) +
-            'MB'
+              Math.round(fileMeta.fileSize / BYTES_PER_MB) +
+              'MB'
           );
         }
 
@@ -150,7 +150,9 @@ class DocumentProcessor {
             });
           },
           (error) => {
-            this.logger.log('NIFI send failed for ' + docId + JSON.stringify(error.message));
+            this.logger.log(
+              'NIFI send failed for ' + docId + JSON.stringify(error.message)
+            );
             this.couchdb.updateStatus(docId, 'ERROR', error.message);
           }
         );
