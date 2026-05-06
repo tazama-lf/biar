@@ -111,7 +111,7 @@ class AlertsETL(BaseETL):
         )
 
         silver = self._flatten_silver(b)
-        bronze = self.drop_hoodie_cols(bronze)
+        silver = self.drop_hoodie_cols(silver)
 
         # Deduplicate – keep latest per alert_id
         w = Window.partitionBy("alert_id").orderBy(F.col("created_at_ts").desc())
