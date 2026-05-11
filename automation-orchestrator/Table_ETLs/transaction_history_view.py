@@ -211,21 +211,17 @@ class TransactionHistoryViewETL(BaseETL):
             .withColumn("cdtr_account_id", cdtr_acct)
         )
 
-        # Debug: log extraction coverage
-        total = base.count()
-        if total > 0:
-            stats = base.select(
-                F.sum(F.when(F.col("dbtr_id").isNotNull(), 1).otherwise(0)).alias("dbtr_id_ok"),
-                F.sum(F.when(F.col("cdtr_id").isNotNull(), 1).otherwise(0)).alias("cdtr_id_ok"),
-                F.sum(F.when(F.col("dbtr_account_id").isNotNull(), 1).otherwise(0)).alias("dbtr_acct_ok"),
-                F.sum(F.when(F.col("cdtr_account_id").isNotNull(), 1).otherwise(0)).alias("cdtr_acct_ok"),
-                F.sum(F.when(F.col("tx_amount").isNotNull(), 1).otherwise(0)).alias("amount_ok"),
-            ).collect()[0]
-            print(f"[TransactionHistoryViewETL] Extraction coverage out of {total} rows:")
-            print(f"  dbtr_id: {stats['dbtr_id_ok']}, cdtr_id: {stats['cdtr_id_ok']}")
-            print(f"  dbtr_account_id: {stats['dbtr_acct_ok']}, cdtr_account_id: {stats['cdtr_acct_ok']}")
-            print(f"  tx_amount: {stats['amount_ok']}")
-
+        stats = base.agg(
+            F.count("*").alias("total"),
+            F.sum(F.when(F.col("dbtr_id").isNotNull(), 1).otherwise(0)).alias("dbtr_id_ok"),
+            F.sum(F.when(F.col("cdtr_id").isNotNull(), 1).otherwise(0)).alias("cdtr_id_ok"),
+            F.sum(F.when(F.col("dbtr_account_id").isNotNull(), 1).otherwise(0)).alias("dbtr_acct_ok"),
+            F.sum(F.when(F.col("cdtr_account_id").isNotNull(), 1).otherwise(0)).alias("cdtr_acct_ok"),
+            F.sum(F.when(F.col("tx_amount").isNotNull(), 1).otherwise(0)).alias("amount_ok"),
+        ).collect()[0]
+        if stats["total"] > 0:
+            print(f"[TransactionHistoryViewETL] Extraction coverage out of {stats['total']} rows:")
+        
         return (
             base
             .select(

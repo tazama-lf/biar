@@ -106,8 +106,41 @@ class AlertNavigatorETL(BaseETL):
         )
 
         if g_tx is not None:
+            # pacs002: alert-triggering message (no amount), keep its identifiers
+            pacs002 = g_tx.alias("pacs002").filter(
+                F.col("tx_amount").isNull()
+            ).select(
+                F.trim(F.col("tx_msg_id").cast("string")).alias("tx_msg_id"),
+                F.trim(F.col("end_to_end_id").cast("string")).alias("end_to_end_id"),
+                F.trim(F.col("transaction_id").cast("string")).alias("transaction_id"),
+            )
+
+            # pacs008: settlement message with amount
+            pacs008 = g_tx.alias("pacs008").filter(
+                F.col("tx_amount").isNotNull()
+            ).select(
+                F.trim(F.col("end_to_end_id").cast("string")).alias("end_to_end_id"),
+                F.col("tx_status").cast("string").alias("tx_status"),
+                F.col("tx_amount").cast("decimal(18,2)").alias("tx_amount"),
+                F.col("tx_ccy").cast("string").alias("tx_ccy"),
+            )
+
+            # Bridge: pacs002 → pacs008 via end_to_end_id
+            g_tx_lookup = pacs002.join(
+                pacs008,
+                on="end_to_end_id",
+                how="inner",
+            ).select(
+                "tx_msg_id",
+                "end_to_end_id",
+                "transaction_id",
+                "tx_status",
+                "tx_amount",
+                "tx_ccy",
+            ).dropDuplicates(["tx_msg_id"])
+
             header = (
-                header.join(g_tx, on="tx_msg_id", how="left")
+                header.join(g_tx_lookup, on="tx_msg_id", how="left")
                 .withColumnRenamed("tx_status", "transaction_status")
                 .withColumnRenamed("tx_amount", "transaction_amount")
                 .withColumnRenamed("tx_ccy", "transaction_currency")
@@ -126,7 +159,7 @@ class AlertNavigatorETL(BaseETL):
             )
 
         return header
-
+          
     def _build_typologies(self, a: DataFrame, b_typ: DataFrame | None) -> DataFrame:
         """Build the alerts_nav_typologies view."""
         typ = (
