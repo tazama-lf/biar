@@ -83,8 +83,8 @@ class RulesETL(BaseETL):
             .withColumn("band_count",          F.coalesce(F.size(F.col("config_obj.bands")), F.lit(0)).cast("int"))
             .withColumn("exit_condition_count", F.coalesce(F.size(F.col("config_obj.exitConditions")), F.lit(0)).cast("int"))
             #.withColumn("evaluation_interval_time_ms", F.col("config_obj.parameters").getField("evaluationIntervalTime").cast("long"))
-            #.withColumn("tolerance",           F.col("config_obj.parameters.tolerance").cast("double"))
-            .withColumn("commission",          F.col("config_obj.parameters.commission").cast("double"))
+            .withColumn("tolerance",           F.col("config_obj.parameters.tolerance").cast("double"))
+            .withColumn("commissionRate",          F.col("config_obj.parameters.commissionRate").cast("double"))
             .withColumn("max_query_range_ms",  F.col("config_obj.parameters.maxQueryRange").cast("long"))
             .withColumn("config_json",         F.to_json(F.col("rule_obj.config")))
             .withColumn("parameters_json",     F.to_json(F.col("config_obj.parameters")))
@@ -102,7 +102,7 @@ class RulesETL(BaseETL):
         silver = s.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
         silver = silver.select(
             "pk", "tenant_id", "rule_id", "rule_cfg", "rule_desc",
-            "band_count", "exit_condition_count", "evaluation_interval_time_ms", "commission", "max_query_range_ms",
+            "band_count", "exit_condition_count", "evaluation_interval_time_ms", "commissionRate", "max_query_range_ms",
             "configuration_json", "configuration_parsed_json", "config_json",
             "parameters_json", "bands_json", "exit_conditions_json",
             "created_at_ts", "source_file_path", "record_hash", "_row_payload_json",
@@ -133,9 +133,9 @@ class RulesETL(BaseETL):
             .withColumn("rule_desc",                   F.col("rule_obj.desc").cast("string"))
             .withColumn("band_count",                  F.coalesce(F.size("bands_arr"), F.lit(0)).cast("int"))
             .withColumn("exit_condition_count",        F.coalesce(F.size("exits_arr"), F.lit(0)).cast("int"))
-            .withColumn("evaluation_interval_time_ms", F.col("params.evaluationIntervalTime").cast("long"))
-            #.withColumn("tolerance",                   F.col("params.tolerance").cast("double"))
-            .withColumn("commission",                  F.col("params.commission").cast("double"))
+            #.withColumn("evaluation_interval_time_ms", F.col("params.evaluationIntervalTime").cast("long"))
+            .withColumn("tolerance",                   F.col("params.tolerance").cast("double"))
+            .withColumn("commissionRate",                  F.col("params.commissionRate").cast("double"))
             .withColumn("max_query_range_ms",          F.col("params.maxQueryRange").cast("long"))
             .withColumn("tenant_id_norm",              F.upper(F.col("tenant_id")))
             .withColumn("rule_id_norm",                F.upper(F.col("rule_id")))
@@ -148,7 +148,7 @@ class RulesETL(BaseETL):
             F.col("pk"), F.col("tenant_id"), F.col("tenant_id_norm"),
             F.col("rule_id"), F.col("rule_id_norm"), F.col("rule_cfg"), F.col("rule_cfg_norm"),
             F.col("rule_desc"), F.col("band_count"), F.col("exit_condition_count"),
-            #F.col("evaluation_interval_time_ms"), F.col("tolerance"), F.col("commission"),
+            F.col("evaluation_interval_time_ms"), F.col("tolerance"), F.col("commissionRate"),
             F.col("max_query_range_ms"), F.col("source_file_path"), F.col("record_hash"),
             F.col("created_at_ts"), F.col("ingested_at_ts"), F.col("as_of_date"),
         ]

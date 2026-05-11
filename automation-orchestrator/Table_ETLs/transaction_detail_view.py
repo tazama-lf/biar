@@ -4,7 +4,7 @@ transaction_detail_view.py
 Builds the vw_transaction_detail view from bronze/transactions.
 Parses pacs.008 + pacs.002 JSON and writes a denormalized Hudi view.
 
-Carries forward the composite primary key transaction_pk
+Carries forward the composite primary key transaction_id
 (TxTp || "||" || endToEndId) from TransactionsETL as the sole primary key.
 """
 
@@ -23,7 +23,7 @@ class TransactionDetailViewETL(BaseETL):
     Reads bronze/transactions, extracts embedded PACS JSON fields,
     and writes vw_transaction_detail as a Hudi view.
 
-    Uses transaction_pk (TxTp||endToEndId) as the primary key.
+    Uses transaction_id (TxTp||endToEndId) as the primary key.
     """
 
     def __init__(self, spark, warehouse_root: str) -> None:
@@ -182,7 +182,7 @@ class TransactionDetailViewETL(BaseETL):
         has_record_hash = "record_hash" in df.columns
 
         return df.select(
-            F.col("transaction_pk").cast("string").alias("transaction_pk"),
+            F.col("transaction_id").cast("string").alias("transaction_id"),
             F.col("end_to_end_id").cast("string").alias("end_to_end_id"),
             F.col("tenant_id").cast("string").alias("tenant_id"),
             F.col("tx_tenant_id").cast("string").alias("tx_tenant_id"),
@@ -238,7 +238,7 @@ class TransactionDetailViewETL(BaseETL):
         rename_map = {
             "endToEndId": "end_to_end_id",
             "tenantId": "tenant_id",
-            "transaction_pk": "transaction_pk",
+            "transaction_id": "transaction_id",
         }
         for src, dst in rename_map.items():
             if src in tx.columns and dst not in tx.columns:
@@ -253,13 +253,13 @@ class TransactionDetailViewETL(BaseETL):
         # 5. Finalize schema
         tx_detail_view = self._finalize_schema(tx)
 
-        # 6. Write Hudi view — transaction_pk is the primary key
+        # 6. Write Hudi view — transaction_id is the primary key
         self.write_hudi(
             tx_detail_view,
             self.view_path,
             self.hudi_opts(
                 "vw_transaction_detail",
-                record_key="transaction_pk",
+                record_key="transaction_id",
                 precombine="ingested_at_ts",
             ),
         )

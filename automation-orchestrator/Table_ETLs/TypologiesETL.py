@@ -132,7 +132,7 @@ class TypologiesETL(BaseETL):
             F.col("typology_cfg").cast("string"),
             F.col("typology_id_in_json").cast("string"),
             F.col("typology_cfg_in_json").cast("string"),
-            F.col("typology_desc").cast("string"),
+            #F.col("typology_desc").cast("string"),
             F.col("typology_name").cast("string"),
             F.col("flow_processor").cast("string"),
             F.col("alert_threshold").cast("int"),

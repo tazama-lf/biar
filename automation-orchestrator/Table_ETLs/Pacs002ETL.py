@@ -76,7 +76,8 @@ class Pacs002ETL(BaseETL):
         self.write_hudi(
             bronze,
             self.bronze_path,
-            self.hudi_opts("bronze_pacs002", "end_to_end_id", "ingested_at_ts"),
+            self.hudi_opts("bronze_pacs002", "end_to_end_id", "ingested_at_ts", partition="event_date",
+                payload_class="org.apache.hudi.common.model.OverwriteWithLatestAvroPayload"),
         )
         print(f"[Pacs002ETL] Bronze written → {self.bronze_path}")
         return self.bronze_path
@@ -154,7 +155,7 @@ class Pacs002ETL(BaseETL):
         self.write_hudi(
             silver,
             self.silver_path,
-            self.hudi_opts("silver_pacs002", "end_to_end_id", "ingested_at_ts"),
+            self.hudi_opts("silver_pacs002", "end_to_end_id", "ingested_at_ts", partition="event_date_silver",),
         )
         print(f"[Pacs002ETL] Silver written → {self.silver_path}")
         return self.silver_path
