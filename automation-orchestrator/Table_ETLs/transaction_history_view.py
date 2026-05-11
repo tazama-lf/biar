@@ -393,12 +393,24 @@ class TransactionHistoryViewETL(BaseETL):
             .rowsBetween(Window.unboundedPreceding, Window.currentRow)
         )
 
+        # Only count actual payment instructions (pacs.008 / pain.001) in cumulative totals.
+        # pacs.002 is a status report for the same transaction, not a new transaction.
+        is_payment_tx = F.col("tx_type").isin(["pacs.008.001.10", "pain.001.001.11"])
+
         return (
             df.withColumn("recent_rank_desc", F.row_number().over(w_recent))
-            .withColumn("cum_tx_count", F.count(F.lit(1)).over(w_cum))
+            .withColumn(
+                "cum_tx_count",
+                F.sum(F.when(is_payment_tx, F.lit(1)).otherwise(F.lit(0))).over(w_cum),
+            )
             .withColumn(
                 "cum_tx_amount",
-                F.sum(F.coalesce(F.col("tx_amount"), F.lit(0.0))).over(w_cum),
+                F.sum(
+                    F.when(
+                        is_payment_tx,
+                        F.coalesce(F.col("tx_amount"), F.lit(0.0)),
+                    ).otherwise(F.lit(0.0))
+                ).over(w_cum),
             )
             .withColumn("row_type", F.lit("EVENT"))
             .withColumn("bucket_granularity", F.lit(None).cast("string"))
@@ -406,57 +418,59 @@ class TransactionHistoryViewETL(BaseETL):
             .withColumn("bucket_tx_count", F.lit(None).cast("long"))
             .withColumn("bucket_tx_amount", F.lit(None).cast("double"))
         )
-
+    
     def _build_agg(self, df: DataFrame, granularity: str) -> DataFrame:
         """Roll up entity rows to a given time granularity with deterministic PK."""
         bucket_start = F.date_trunc(granularity, F.col("event_ts"))
 
+        # Only aggregate actual payment instructions, not status reports
+        is_payment_tx = F.col("tx_type").isin(["pacs.008.001.10", "pain.001.001.11"])
+
         return (
             df.withColumn("bucket_start", bucket_start)
-        .groupBy("entity_type", "entity_role", "entity_id", "bucket_start")
-        .agg(
-            F.count("*").cast("long").alias("bucket_tx_count"),
-            F.sum(F.coalesce(F.col("tx_amount"), F.lit(0.0)))
-                .cast("double")
-                .alias("bucket_tx_amount"),
-            F.max("event_date").alias("event_date"),
-            F.max("tenant_id").alias("tenant_id"),
+            .filter(is_payment_tx)  # <-- EXCLUDE pacs.002 from aggregates
+            .groupBy("entity_type", "entity_role", "entity_id", "bucket_start")
+            .agg(
+                F.count("*").cast("long").alias("bucket_tx_count"),
+                F.sum(F.coalesce(F.col("tx_amount"), F.lit(0.0)))
+                    .cast("double")
+                    .alias("bucket_tx_amount"),
+                F.max("event_date").alias("event_date"),
+                F.max("tenant_id").alias("tenant_id"),
+            )
+            .withColumn("row_type", F.lit("AGG"))
+            .withColumn("bucket_granularity", F.lit(granularity))
+
+            .withColumn(
+                "transaction_id",
+                F.concat_ws(
+                     "||",
+                    F.lit("AGG"),
+                    F.col("entity_type"),
+                    F.col("entity_role"),
+                    F.col("entity_id"),
+                    F.col("bucket_granularity"),
+                    F.col("bucket_start").cast("string"),
+                ),
+            )
+
+            # Remaining columns (unchanged)
+            .withColumn("recent_rank_desc", F.lit(None).cast("int"))
+            .withColumn("cum_tx_count", F.lit(None).cast("long"))
+            .withColumn("cum_tx_amount", F.lit(None).cast("double"))
+            .withColumn("end_to_end_id", F.lit(None).cast("string"))
+            .withColumn("tx_type", F.lit(None).cast("string"))
+            .withColumn("tx_msg_id", F.lit(None).cast("string"))
+            .withColumn("event_ts", F.lit(None).cast("timestamp"))
+            .withColumn("tx_amount", F.lit(None).cast("double"))
+            .withColumn("tx_ccy", F.lit(None).cast("string"))
+            .withColumn("entity_name", F.lit(None).cast("string"))
+            .withColumn("is_alerted", F.lit(None).cast("int"))
+            .withColumn("is_investigated", F.lit(None).cast("int"))
+            .withColumn("source_file_path", F.lit(None).cast("string"))
+            .withColumn("record_hash", F.lit(None).cast("string"))
         )
-        .withColumn("row_type", F.lit("AGG"))
-        .withColumn("bucket_granularity", F.lit(granularity))
-
-        .withColumn(
-            "transaction_id",
-            F.concat_ws(
-                 "||",
-                F.lit("AGG"),
-                F.col("entity_type"),
-                F.col("entity_role"),
-                F.col("entity_id"),
-                F.col("bucket_granularity"),
-                F.col("bucket_start").cast("string"),
-            ),
-        )
-
-        # -------------------------------------------------------------
-        # Remaining columns (unchanged)
-        # -------------------------------------------------------------
-        .withColumn("recent_rank_desc", F.lit(None).cast("int"))
-        .withColumn("cum_tx_count", F.lit(None).cast("long"))
-        .withColumn("cum_tx_amount", F.lit(None).cast("double"))
-        .withColumn("end_to_end_id", F.lit(None).cast("string"))
-        .withColumn("tx_type", F.lit(None).cast("string"))
-        .withColumn("tx_msg_id", F.lit(None).cast("string"))
-        .withColumn("event_ts", F.lit(None).cast("timestamp"))
-        .withColumn("tx_amount", F.lit(None).cast("double"))
-        .withColumn("tx_ccy", F.lit(None).cast("string"))
-        .withColumn("entity_name", F.lit(None).cast("string"))
-        .withColumn("is_alerted", F.lit(None).cast("int"))
-        .withColumn("is_investigated", F.lit(None).cast("int"))
-        .withColumn("source_file_path", F.lit(None).cast("string"))
-        .withColumn("record_hash", F.lit(None).cast("string"))
-    )
-
+    
     def _add_pk(self, df: DataFrame) -> DataFrame:
         """Add unique record key for Hudi + ingestion timestamp.
 

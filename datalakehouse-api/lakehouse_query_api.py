@@ -125,6 +125,7 @@ alerts_nav_rules_path                 = f"{ALERT_NAV_ROOT}/rules_triggered"
 tx_detail_view_path                   = f"{VIEWS_ROOT}/vw_transaction_detail"
 tx_history_view_path                  = f"{VIEWS_ROOT}/vw_transaction_history"
 conditions_view_path                  = f"{VIEWS_ROOT}/conditions_timeline"
+alert_history_view_path                   = f"{VIEWS_ROOT}/alert_history"
 vw_tx_network_accounts_edges_path     = f"{VIEWS_ROOT}/vw_tx_network_accounts_edges"
 vw_tx_network_counterparties_edges_path = f"{VIEWS_ROOT}/vw_tx_network_counterparties_edges"
 vw_counterparty_account_links_path    = f"{VIEWS_ROOT}/vw_counterparty_account_links"
@@ -151,6 +152,7 @@ GOLD_PATHS = {
     "tx_network_accounts_edges":       vw_tx_network_accounts_edges_path,
     "tx_network_counterparties_edges": vw_tx_network_counterparties_edges_path,
     "counterparty_account_links":      vw_counterparty_account_links_path,
+    "alert_history":                   alert_history_view_path,
     
 }
 
