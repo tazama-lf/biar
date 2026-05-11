@@ -58,7 +58,7 @@ class NetworkNavigatorViewETL(BaseETL):
         rename_map = {
             "endToEndId": "end_to_end_id",
             "tenantId": "tenant_id",
-            "transaction_pk": "transaction_pk",
+            "transaction_id": "transaction_id",
         }
         for src, dst in rename_map.items():
             if src in tx.columns and dst not in tx.columns:
@@ -113,7 +113,7 @@ class NetworkNavigatorViewETL(BaseETL):
             .withColumn("dbtr_account_id", dbtr_acct)
             .withColumn("cdtr_account_id", cdtr_acct)
             .select(
-                F.col("transaction_pk").cast("long").alias("transaction_pk"),
+                F.col("transaction_id").cast("long").alias("transaction_id"),
                 F.col("end_to_end_id").cast("string").alias("end_to_end_id"),
                 F.col("tenant_id").cast("string").alias("tenant_id"),
                 F.col("tx_type").cast("string").alias("tx_type"),

@@ -10,9 +10,9 @@ Transactions are derived from PACS bronze tables.  Two modes:
 Primary key
 -----------
 The record key is a composite of TxTp (message type) and EndToEndId, stored as
-a single derived column `transaction_pk`:
+a single derived column `transaction_id`:
 
-    transaction_pk = TxTp + "||" + endToEndId   (plain string concatenation)
+    transaction_id = TxTp + "||" + endToEndId   (plain string concatenation)
 
 For example: "pacs.008.001.10||2024-ABC-123-XYZ"
 
@@ -53,7 +53,7 @@ class TransactionsETL(BaseETL):
         """
         Build the plain composite primary key.
 
-        transaction_pk = TxTp + "||" + endToEndId
+        transaction_id = TxTp + "||" + endToEndId
 
         For example: "pacs.008.001.10||2024-ABC-123-XYZ"
         Both inputs are coalesced to empty string so a null never breaks
@@ -135,7 +135,7 @@ class TransactionsETL(BaseETL):
                 ),
             )
             # Composite PK: TxTp || endToEndId (plain string, no hashing)
-            .withColumn("transaction_pk", self._make_pk("tx_type", "endToEndId"))
+            .withColumn("transaction_id", self._make_pk("tx_type", "endToEndId"))
             .withColumn(
                 "record_hash",
                 F.sha2(
@@ -157,7 +157,7 @@ class TransactionsETL(BaseETL):
             bronze,
             self.bronze_path,
             # Hudi record key is the composite PK column
-            self.hudi_opts("transactions", "transaction_pk", "created_at_ts"),
+            self.hudi_opts("transactions", "transaction_id", "created_at_ts"),
         )
         print(f"[TransactionsETL] Bronze written → {self.bronze_path}")
         return self.bronze_path
@@ -274,17 +274,17 @@ class TransactionsETL(BaseETL):
                 ),
             )
             # Recompute composite PK with the now-resolved tx_type (covers null-at-bronze cases)
-            .withColumn("transaction_pk", self._make_pk("tx_type", "endToEndId"))
+            .withColumn("transaction_id", self._make_pk("tx_type", "endToEndId"))
         )
 
         # Dedup: keep latest per composite key
-        w = Window.partitionBy("transaction_pk").orderBy(F.col("created_at_ts").desc())
+        w = Window.partitionBy("transaction_id").orderBy(F.col("created_at_ts").desc())
         silver = s.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
 
         self.write_hudi(
             silver,
             self.silver_path,
-            self.hudi_opts("silver_transactions", "transaction_pk", "created_at_ts"),
+            self.hudi_opts("silver_transactions", "transaction_id", "created_at_ts"),
         )
         print(f"[TransactionsETL] Silver written → {self.silver_path}")
         return self.silver_path
@@ -307,7 +307,7 @@ class TransactionsETL(BaseETL):
             )
             .select(
                 # Composite PK carried through to gold
-                F.col("transaction_pk").cast("string").alias("transaction_pk"),
+                F.col("transaction_id").cast("string").alias("transaction_id"),
                 F.col("endToEndId").cast("string").alias("end_to_end_id"),
                 F.col("tenantId").cast("string").alias("tenant_id"),
                 F.col("tx_type").cast("string").alias("tx_type"),
@@ -332,7 +332,7 @@ class TransactionsETL(BaseETL):
             raise RuntimeError(f"[TransactionsETL] Gold contains non-scalar cols: {bad}")
 
         gold_opts = {
-            **self.hudi_opts("transactions", "transaction_pk", "ingested_at_ts"),
+            **self.hudi_opts("transactions", "transaction_id", "ingested_at_ts"),
             "hoodie.datasource.write.payload.class": "org.apache.hudi.common.model.OverwriteWithLatestAvroPayload",
         }
         self.write_hudi(gold, self.gold_path, gold_opts)
