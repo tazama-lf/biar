@@ -64,6 +64,7 @@ class AlertsETL(BaseETL):
         df = (
             cast.withColumn("created_at_ts", F.current_timestamp())
             .withColumn("source_file_path", F.input_file_name())
+            .withColumn("alert_pk", F.concat_ws("#", F.col("tenant_id"), F.col("alert_id")))
         )
 
         hash_cols = [c for c in df.columns if c != "created_at_ts"]
@@ -81,7 +82,7 @@ class AlertsETL(BaseETL):
         self.write_hudi(
             df,
             self.bronze_path,
-            self.hudi_opts("bronze_alerts", "alert_id", "created_at_ts"),
+            self.hudi_opts("bronze_alerts", "alert_pk", "created_at_ts"),
         )
         print(f"[AlertsETL] Bronze written → {self.bronze_path}")
         return self.bronze_path
@@ -141,11 +142,19 @@ class AlertsETL(BaseETL):
             self.hudi_opts("silver_alerts_dlq", "dlq_id", "dlq_ingested_at"),
         )
 
+        # Enable nullable array element support for Parquet (alerts has arrays with nulls)
+        hadoop_conf = self.spark._jsc.hadoopConfiguration()
+        hadoop_conf.set("parquet.avro.write-old-list-structure", "false")
+
         self.write_hudi(
             silver_pass,
             self.silver_path,
-            self.hudi_opts("silver_alerts", "alert_id", "created_at_ts"),
+            self.hudi_opts("silver_alerts", "alert_pk", "created_at_ts"),
         )
+
+        # Reset to default after write
+        hadoop_conf.unset("parquet.avro.write-old-list-structure")
+
         print(f"[AlertsETL] Silver written → {self.silver_path}")
         return self.silver_path
 
@@ -173,7 +182,7 @@ class AlertsETL(BaseETL):
             .withColumn("rule_count_total",      F.expr("aggregate(alert_data_obj.tadpResult.typologyResult, 0, (acc, x) -> acc + size(x.ruleResults))"))
             # rule_pairs (unique by rule_id)
             .withColumn("rule_pairs", F.flatten(F.expr(rule_pairs_expr)))
-            .withColumn("rule_pairs", F.expr("aggregate(rule_pairs, cast(array() as array<struct<rule_id:string, weight:bigint>>), (acc, x) -> IF(array_contains(transform(acc, y -> y.rule_id), x.rule_id), acc, concat(acc, array(x))))"))
+            .withColumn("rule_pairs", F.expr("aggregate(rule_pairs, cast(array() as array<<struct<<rule_id:string, weight:bigint>>), (acc, x) -> IF(array_contains(transform(acc, y -> y.rule_id), x.rule_id), acc, concat(acc, array(x))))"))
             .withColumn("rule_pairs", F.expr("filter(rule_pairs, x -> x.rule_id is not null)"))
             .withColumn("rule_weights_json",     F.to_json(F.col("rule_pairs")))
             .withColumn("rule_id_count_distinct", F.size(F.expr("transform(rule_pairs, x -> x.rule_id)")))
@@ -341,7 +350,7 @@ class AlertsETL(BaseETL):
         )
 
         gold_opts = {
-            **self.hudi_opts("alerts", "alert_id", "created_at_ts", partition="event_date"),
+            **self.hudi_opts("alerts", "alert_pk", "created_at_ts", partition="event_date"),
             "hoodie.datasource.write.payload.class": "org.apache.hudi.common.model.OverwriteWithLatestAvroPayload",
         }
         self.write_hudi(gold, self.gold_path, gold_opts)
