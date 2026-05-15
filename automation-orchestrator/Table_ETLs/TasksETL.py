@@ -96,7 +96,6 @@ class TasksETL(BaseETL):
             .withColumn("task_type",          F.col("task_type").cast("string"))
             .withColumn("created_at_ts",      F.current_timestamp())
             .withColumn("source_file_path",   F.lit(source_path))
-            .withColumn("task_pk",            F.concat_ws("#", F.col("tenant_id"), F.col("task_id")))
         )
 
         hash_cols = [c for c in bronze.columns if c != "created_at_ts"]
@@ -111,7 +110,7 @@ class TasksETL(BaseETL):
         self.write_hudi(
             bronze,
             self.bronze_path,
-            self.hudi_opts("tasks", "task_pk", "created_at_ts"),
+            self.hudi_opts("tasks", "task_id", "created_at_ts"),
         )
         print(f"[TasksETL] Bronze written → {self.bronze_path}")
         return self.bronze_path
@@ -190,7 +189,7 @@ class TasksETL(BaseETL):
         #     .withColumn("dlq_ingested_at", F.current_timestamp())
         # )
 
-        self.write_hudi(silver, self.silver_path, self.hudi_opts("tasks", "task_pk", "created_at_ts"))
+        self.write_hudi(silver, self.silver_path, self.hudi_opts("tasks", "task_id", "created_at_ts"))
         print(f"[TasksETL] Silver + DLQ written → {self.silver_path}")
         return self.silver_path
 
@@ -237,7 +236,6 @@ class TasksETL(BaseETL):
 
         gold = s.select(
             F.col("task_id").cast("long").alias("task_id"),
-            F.col("task_pk").cast("string").alias("task_pk"),
             F.col("case_id").cast("long").alias("case_id"),
             F.col("task_type").cast("string").alias("task_type"),
             F.col("candidate_group_norm").cast("string").alias("candidate_group"),
@@ -262,7 +260,7 @@ class TasksETL(BaseETL):
         )
 
         gold_opts = {
-            **self.hudi_opts("tasks", "task_pk", "ingested_at_ts", partition="task_created_date"),
+            **self.hudi_opts("tasks", "task_id", "ingested_at_ts", partition="task_created_date"),
             "hoodie.datasource.write.payload.class": "org.apache.hudi.common.model.OverwriteWithLatestAvroPayload",
         }
         self.write_hudi(gold, self.gold_path, gold_opts)

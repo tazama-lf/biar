@@ -50,7 +50,6 @@ class CasesETL(BaseETL):
             .withColumn("updated_at",            F.col("updated_at").cast("string"))
             .withColumn("created_at_ts",         F.current_timestamp())
             .withColumn("source_file_path",      F.lit(source_path))
-            .withColumn("case_pk",               F.concat_ws("#", F.col("tenant_id"), F.col("case_id")))
         )
 
         hash_cols = [c for c in bronze.columns if c != "created_at_ts"]
@@ -66,7 +65,7 @@ class CasesETL(BaseETL):
         self.write_hudi(
             bronze,
             self.bronze_path,
-            self.hudi_opts("cases", "case_pk", "created_at_ts"),
+            self.hudi_opts("cases", "case_id", "created_at_ts"),
         )
         print(f"[CasesETL] Bronze written → {self.bronze_path}")
         return self.bronze_path
@@ -106,7 +105,7 @@ class CasesETL(BaseETL):
         silver = silver.select(
             "_hoodie_commit_time", "_hoodie_commit_seqno", "_hoodie_record_key",
             "_hoodie_partition_path", "_hoodie_file_name",
-            "case_id", "case_pk", "tenant_id", "parent_id",
+            "case_id", "tenant_id", "parent_id",
             "case_creation_type", "case_creation_type_norm",
             "case_creator_user_id", "case_owner_user_id",
             "case_type", "priority", "priority_norm", "status", "status_norm",
@@ -118,7 +117,7 @@ class CasesETL(BaseETL):
         self.write_hudi(
             silver,
             self.silver_path,
-            self.hudi_opts("cases", "case_pk", "created_at_ts"),
+            self.hudi_opts("cases", "case_id", "created_at_ts"),
         )
         print(f"[CasesETL] Silver written → {self.silver_path}")
         return self.silver_path
@@ -170,7 +169,6 @@ class CasesETL(BaseETL):
 
         gold = g.select(
             F.col("case_id").cast("long").alias("case_id"),
-            F.col("case_pk").cast("string").alias("case_pk"),
             F.col("tenant_id").cast("string").alias("tenant_id"),
             F.col("parent_id").cast("long").alias("parent_id"),
             F.col("case_creation_type_norm").cast("string").alias("case_creation_type"),
@@ -194,7 +192,7 @@ class CasesETL(BaseETL):
         )
 
         gold_opts = {
-            **self.hudi_opts("cases", "case_pk", "ingested_at_ts", partition="case_created_date"),
+            **self.hudi_opts("cases", "case_id", "ingested_at_ts", partition="case_created_date"),
             "hoodie.datasource.write.payload.class": "org.apache.hudi.common.model.OverwriteWithLatestAvroPayload",
         }
         self.write_hudi(gold, self.gold_path, gold_opts)

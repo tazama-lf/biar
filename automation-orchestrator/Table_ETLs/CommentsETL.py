@@ -7,7 +7,6 @@ Bronze → Silver → Gold ETL for the Comments domain.
 from __future__ import annotations
 
 from pyspark.sql import functions as F
-from pyspark.sql.window import Window
 
 from .BaseETL import BaseETL
 
