@@ -41,7 +41,7 @@ class BaseETL(ABC):
 
     @staticmethod
     def hudi_opts(
-        table_name: str,ik,,
+        table_name: str,
         record_key: str,
         precombine: str,
         partition: Optional[str] = None,

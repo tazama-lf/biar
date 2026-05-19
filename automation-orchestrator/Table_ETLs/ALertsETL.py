@@ -183,7 +183,7 @@ class AlertsETL(BaseETL):
             .withColumn("rule_count_total",      F.expr("aggregate(alert_data_obj.tadpResult.typologyResult, 0, (acc, x) -> acc + size(x.ruleResults))"))
             # rule_pairs (unique by rule_id)
             .withColumn("rule_pairs", F.flatten(F.expr(rule_pairs_expr)))
-            .withColumn("rule_pairs", F.expr("aggregate(rule_pairs, cast(array() as array<<struct<<rule_id:string, weight:bigint>>), (acc, x) -> IF(array_contains(transform(acc, y -> y.rule_id), x.rule_id), acc, concat(acc, array(x))))"))
+            .withColumn("rule_pairs", F.expr("aggregate(rule_pairs, cast(array() as array<struct<rule_id:string, weight:bigint>>), (acc, x) -> IF(array_contains(transform(acc, y -> y.rule_id), x.rule_id), acc, concat(acc, array(x))))"))
             .withColumn("rule_pairs", F.expr("filter(rule_pairs, x -> x.rule_id is not null)"))
             .withColumn("rule_weights_json",     F.to_json(F.col("rule_pairs")))
             .withColumn("rule_id_count_distinct", F.size(F.expr("transform(rule_pairs, x -> x.rule_id)")))

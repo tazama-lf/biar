@@ -70,19 +70,25 @@ class Pacs008ETL(BaseETL):
     # ------------------------------------------------------------------
 
     def bronze(self, source_path: str) -> str:
+        from pyspark.sql.types import StringType
+
         df = self.spark.read.json(source_path)
+
+        # --- SAFE: branch in Python so Spark never sees to_json() on a string ---
+        if isinstance(df.schema["document"].dataType, StringType):
+            df = df.withColumn("document_json", F.col("document"))
+        else:
+            df = df.withColumn("document_json", F.to_json(F.col("document")))
 
         bronze = (
             df
+            .drop("document")
             .withColumnRenamed("tenantid",           "tenant_id")
             .withColumnRenamed("messageid",          "message_id")
             .withColumnRenamed("endtoendid",         "end_to_end_id")
             .withColumnRenamed("credttm",            "credttm_raw")
             .withColumnRenamed("creditoraccountid",  "creditor_account_id")
             .withColumnRenamed("debtoraccountid",    "debtor_account_id")
-            # FIX #1: use to_json() to get a real JSON string, then drop the struct
-            .withColumn("document_json", F.to_json(F.col("document")))
-            .drop("document")
             .withColumn("credttm_ts",     F.to_timestamp(F.col("credttm_raw")))
             .withColumn("event_date",     F.to_date(F.col("credttm_ts")))
             .withColumn("ingested_at_ts", F.current_timestamp())
@@ -112,7 +118,7 @@ class Pacs008ETL(BaseETL):
             self.hudi_opts("bronze_pacs008", "end_to_end_id", "ingested_at_ts"),
         )
         return self.bronze_path
-    
+            
     # ------------------------------------------------------------------
     # SILVER
     # ------------------------------------------------------------------
@@ -155,13 +161,12 @@ class Pacs008ETL(BaseETL):
             .withColumn("cdtr_name",        F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Nm"))
             .withColumn("cdtr_id",          F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Id.PrvtId.Othr").getItem(0).getField("Id"))
             .withColumn("cdtr_acct_id",     F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr").getItem(0).getField("Id"))
-            .withColumn("cdtr_acct_scheme", F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr").getItem(0).getField("SchmeNm.Prtry"))
-
+            .withColumn("cdtr_acct_scheme", F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr").getItem(0).getField("SchmeNm").getField("Prtry"))
             # --- Debtor ---
             .withColumn("dbtr_name",        F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Nm"))
             .withColumn("dbtr_id",          F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Id.PrvtId.Othr").getItem(0).getField("Id"))
             .withColumn("dbtr_acct_id",     F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr").getItem(0).getField("Id"))
-            .withColumn("dbtr_acct_scheme", F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr").getItem(0).getField("SchmeNm.Prtry"))
+            .withColumn("dbtr_acct_scheme", F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr").getItem(0).getField("SchmeNm").getField("Prtry"))
 
             # --- Charges ---
             .withColumn("charge_amt",          F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.ChrgsInf.Amt.Amt").cast("double"))
@@ -194,6 +199,7 @@ class Pacs008ETL(BaseETL):
             self.hudi_opts("silver_pacs008", "end_to_end_id", "ingested_at_ts"),
         )
         return self.silver_path
+    
     # ------------------------------------------------------------------
     # GOLD
     # ------------------------------------------------------------------
