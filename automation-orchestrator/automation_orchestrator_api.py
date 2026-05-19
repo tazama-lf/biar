@@ -81,6 +81,7 @@ def get_spark_session():
         .config("spark.kryo.registrator", "org.apache.spark.HoodieSparkKryoRegistrar")
         .config("spark.sql.extensions", "org.apache.spark.sql.hudi.HoodieSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.hudi.catalog.HoodieCatalog")
+        .config("spark.hadoop.parquet.avro.write-old-list-structure", "false")
         # Memory & performance
         .config("spark.local.dir", _env("SPARK_LOCAL_DIR", "/tmp/spark"))
         .config("spark.driver.memory", _env("SPARK_DRIVER_MEMORY", "6g"))

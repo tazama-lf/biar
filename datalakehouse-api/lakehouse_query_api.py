@@ -9,16 +9,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
-from pyspark.sql.window import Window
 import os
 import threading
 import findspark
-import tempfile
-import json
 import time
 import logging
 import re
-import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pipeline")

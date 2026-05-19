@@ -133,7 +133,7 @@ class Pacs002ETL(BaseETL):
             .withColumn("charge_currency_count", F.when(charges.isNotNull(), F.expr("size(array_distinct(transform(doc.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x.Amt.Ccy)))")).otherwise(F.lit(0)).cast("int"))
             .withColumn("charge_currency_hint",  F.when(charges.isNotNull(), F.expr("element_at(array_distinct(transform(doc.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x.Amt.Ccy)), 1)")).otherwise(F.lit(None).cast("string")))
             .withColumn("event_ts",             F.coalesce(F.col("grp_cre_dt_tm"), F.col("credttm_ts"), F.col("dc_cre_dt_tm")))
-            .withColumn("event_date_silver",    F.to_date(F.col("event_ts")))
+            .withColumn("event_date",    F.to_date(F.col("event_ts")))
         )
 
         if "tx_type" not in s.columns:
@@ -155,7 +155,7 @@ class Pacs002ETL(BaseETL):
         self.write_hudi(
             silver,
             self.silver_path,
-            self.hudi_opts("silver_pacs002", "end_to_end_id", "ingested_at_ts", partition="event_date_silver",
+            self.hudi_opts("silver_pacs002", "end_to_end_id", "ingested_at_ts", partition="event_date",
                 payload_class="org.apache.hudi.common.model.OverwriteWithLatestAvroPayload"),
         )
         print(f"[Pacs002ETL] Silver written → {self.silver_path}")

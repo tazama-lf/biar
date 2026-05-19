@@ -14,7 +14,6 @@ from Table_ETLs.ConditionsETL import ConditionsETL
 from Table_ETLs.Netwrok_MapETL import NetworkMapETL
 from Table_ETLs.RulesETL import RulesETL
 from Table_ETLs.TasksETL import TasksETL
-from Table_ETLs.TransactionsETL import TransactionsETL
 from Table_ETLs.TypologiesETL import TypologiesETL
 from Table_ETLs.CommentsETL import CommentsETL
 from Table_ETLs.EntityETL import EntityETL

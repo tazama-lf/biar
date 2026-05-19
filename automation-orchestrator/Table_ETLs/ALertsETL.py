@@ -146,12 +146,21 @@ class AlertsETL(BaseETL):
             self.silver_path,
             self.hudi_opts("silver_alerts", "alert_id", "created_at_ts"),
         )
+
         print(f"[AlertsETL] Silver written → {self.silver_path}")
         return self.silver_path
 
     def _flatten_silver(self, b):
         """Extract every field needed at the silver layer."""
-        rule_pairs_expr = ("""transform(alert_data_obj.tadpResult.typologyResult, t -> transform(t.ruleResults, r -> named_struct('rule_id', r.id, 'weight', cast(r.wght as long))))"""  )
+        # FIX: filter null elements before transform to avoid Parquet writer crash
+        rule_pairs_expr = (
+            "transform("
+            "  filter(alert_data_obj.tadpResult.typologyResult, t -> t is not null),"
+            "  t -> transform(filter(t.ruleResults, r -> r is not null),"
+            "    r -> named_struct('rule_id', r.id, 'weight', cast(r.wght as long))"
+            "  )"
+            ")"
+        )
         return (
             b
             .withColumn("alert_id",              F.col("alert_id").cast("long"))
@@ -164,12 +173,13 @@ class AlertsETL(BaseETL):
             .withColumn("tadp_cfg",              F.col("alert_data_obj.tadpResult.cfg"))
             .withColumn("tadp_processing_time",  F.col("alert_data_obj.tadpResult.prcgTm").cast("long"))
             .withColumn("typology_count",        F.size(F.col("alert_data_obj.tadpResult.typologyResult")))
-            .withColumn("typology_ids",          F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> x.id)"))
-            .withColumn("typology_results",      F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.result as int))"))
-            .withColumn("typology_reviews",      F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.review as boolean))"))
-            .withColumn("workflow_processors",   F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> x.workflow.flowProcessor)"))
-            .withColumn("alert_thresholds",      F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.workflow.alertThreshold as int))"))
-            .withColumn("interdiction_thresholds", F.expr("transform(alert_data_obj.tadpResult.typologyResult, x -> cast(x.workflow.interdictionThreshold as int))"))
+            # FIX: filter null elements before transform to avoid Parquet writer crash
+            .withColumn("typology_ids",          F.expr("transform(filter(alert_data_obj.tadpResult.typologyResult, x -> x is not null), x -> x.id)"))
+            .withColumn("typology_results",      F.expr("transform(filter(alert_data_obj.tadpResult.typologyResult, x -> x is not null), x -> cast(x.result as int))"))
+            .withColumn("typology_reviews",      F.expr("transform(filter(alert_data_obj.tadpResult.typologyResult, x -> x is not null), x -> cast(x.review as boolean))"))
+            .withColumn("workflow_processors",   F.expr("transform(filter(alert_data_obj.tadpResult.typologyResult, x -> x is not null), x -> x.workflow.flowProcessor)"))
+            .withColumn("alert_thresholds",      F.expr("transform(filter(alert_data_obj.tadpResult.typologyResult, x -> x is not null), x -> cast(x.workflow.alertThreshold as int))"))
+            .withColumn("interdiction_thresholds", F.expr("transform(filter(alert_data_obj.tadpResult.typologyResult, x -> x is not null), x -> cast(x.workflow.interdictionThreshold as int))"))
             .withColumn("rule_count_total",      F.expr("aggregate(alert_data_obj.tadpResult.typologyResult, 0, (acc, x) -> acc + size(x.ruleResults))"))
             # rule_pairs (unique by rule_id)
             .withColumn("rule_pairs", F.flatten(F.expr(rule_pairs_expr)))
@@ -189,18 +199,19 @@ class AlertsETL(BaseETL):
             .withColumn("instg_mmb_id",          F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.InstgAgt.FinInstnId.ClrSysMmbId.MmbId"))
             .withColumn("instd_mmb_id",          F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.InstdAgt.FinInstnId.ClrSysMmbId.MmbId"))
             .withColumn("charge_count",          F.size(F.col("transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf")))
-            .withColumn("charge_agent_mmb_ids",  F.expr("transform(transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x.Agt.FinInstnId.ClrSysMmbId.MmbId)"))
-            .withColumn("charge_amounts",        F.expr("transform(transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> cast(x.Amt.Amt as double))"))
-            .withColumn("charge_ccys",           F.expr("transform(transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x.Amt.Ccy)"))
+            # FIX: filter null elements before transform to avoid Parquet writer crash
+            .withColumn("charge_agent_mmb_ids",  F.expr("transform(filter(transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x is not null), x -> x.Agt.FinInstnId.ClrSysMmbId.MmbId)"))
+            .withColumn("charge_amounts",        F.expr("transform(filter(transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x is not null), x -> cast(x.Amt.Amt as double))"))
+            .withColumn("charge_ccys",           F.expr("transform(filter(transaction_obj.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x is not null), x -> x.Amt.Ccy)"))
             .withColumn("network_cfg",           F.col("network_map_obj.cfg"))
             .withColumn("network_active",        F.col("network_map_obj.active").cast("boolean"))
             .withColumn("network_tenant_id",     F.col("network_map_obj.tenantId"))
             .withColumn("network_message_count", F.size(F.col("network_map_obj.messages")))
-            .withColumn("network_message_ids",   F.expr("transform(network_map_obj.messages, x -> x.id)"))
+            .withColumn("network_message_ids",   F.expr("transform(filter(network_map_obj.messages, x -> x is not null), x -> x.id)"))
             .select(
                 "_hoodie_commit_time", "_hoodie_commit_seqno", "_hoodie_record_key",
                 "_hoodie_partition_path", "_hoodie_file_name",
-                "alert_id", "case_id", "tenant_id", "priority", "priority_score",
+                 "alert_id", "case_id", "tenant_id", "priority", "priority_score",
                 "alert_type", "prediction_outcome", "source", "txtp", "message", "confidence_per",
                 "event_ts", "event_date", "tx_created_ts", "tx_accept_ts", "created_at", "created_at_ts",
                 "alert_status", "evaluation_id", "processing_time_dp", "processing_time_ed",
@@ -274,11 +285,12 @@ class AlertsETL(BaseETL):
         )
         g = s.withColumn("alert_data_obj", F.from_json("alert_data", alert_schema))
 
+        # FIX: filter null elements before transform to avoid Parquet writer crash
         g = (
             g
             .withColumn("rule_pairs", F.flatten(F.expr(
-                "transform(alert_data_obj.tadpResult.typologyResult, "
-                "  t -> transform(t.ruleResults, r -> named_struct("
+                "transform(filter(alert_data_obj.tadpResult.typologyResult, t -> t is not null), "
+                "  t -> transform(filter(t.ruleResults, r -> r is not null), r -> named_struct("
                 "    'rule_id', r.id, 'weight', cast(r.wght as long)"
                 "  ))"
                 ")"

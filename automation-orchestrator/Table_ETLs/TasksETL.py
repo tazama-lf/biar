@@ -82,6 +82,7 @@ class TasksETL(BaseETL):
             df
             .withColumn("task_id",            F.col("task_id").cast("long"))
             .withColumn("case_id",            F.col("case_id").cast("long"))
+            .withColumn("tenant_id",            F.col("tenant_id").cast("long"))
             .withColumn("created_at",         F.col("created_at").cast("string"))
             .withColumn("updated_at",         F.col("updated_at").cast("string"))
             .withColumn("completed_at",       F.col("completed_at").cast("string"))

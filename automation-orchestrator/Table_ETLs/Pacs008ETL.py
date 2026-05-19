@@ -70,18 +70,25 @@ class Pacs008ETL(BaseETL):
     # ------------------------------------------------------------------
 
     def bronze(self, source_path: str) -> str:
+        from pyspark.sql.types import StringType
+
         df = self.spark.read.json(source_path)
-        print("[Pacs008ETL] Raw messages read.")
+
+        # --- SAFE: branch in Python so Spark never sees to_json() on a string ---
+        if isinstance(df.schema["document"].dataType, StringType):
+            df = df.withColumn("document_json", F.col("document"))
+        else:
+            df = df.withColumn("document_json", F.to_json(F.col("document")))
 
         bronze = (
             df
+            .drop("document")
             .withColumnRenamed("tenantid",           "tenant_id")
             .withColumnRenamed("messageid",          "message_id")
             .withColumnRenamed("endtoendid",         "end_to_end_id")
             .withColumnRenamed("credttm",            "credttm_raw")
             .withColumnRenamed("creditoraccountid",  "creditor_account_id")
             .withColumnRenamed("debtoraccountid",    "debtor_account_id")
-            .withColumn("document_json",  F.col("document").cast("string"))
             .withColumn("credttm_ts",     F.to_timestamp(F.col("credttm_raw")))
             .withColumn("event_date",     F.to_date(F.col("credttm_ts")))
             .withColumn("ingested_at_ts", F.current_timestamp())
@@ -110,33 +117,79 @@ class Pacs008ETL(BaseETL):
             self.bronze_path,
             self.hudi_opts("bronze_pacs008", "end_to_end_id", "ingested_at_ts"),
         )
-        print(f"[Pacs008ETL] Bronze written → {self.bronze_path}")
         return self.bronze_path
-
+            
     # ------------------------------------------------------------------
     # SILVER
     # ------------------------------------------------------------------
 
     def silver(self) -> str:
         bronze_df = self.spark.read.format("hudi").load(self.bronze_path)
-        doc_schema = self.infer_json_schema(bronze_df, "document")
+
+        # Infer schema from the JSON string column
+        doc_schema = self.infer_json_schema(bronze_df, "document_json")
+        df = bronze_df.withColumn("d", F.from_json("document_json", doc_schema))
 
         silver = (
-            bronze_df
-            .withColumn("doc_obj",        F.from_json("document", doc_schema))
-            .withColumn("msg_id",         F.get_json_object("document", "$.FIToFICstmrCdtTrf.GrpHdr.MsgId"))
-            .withColumn("creation_dt_tm", F.to_timestamp(F.get_json_object("document", "$.FIToFICstmrCdtTrf.GrpHdr.CreDtTm")))
-            .withColumn("tx_type",        F.lit("pacs.008.001.10"))
-            .withColumn("instd_amt",      F.get_json_object("document", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Amt").cast("double"))
-            .withColumn("instd_ccy",      F.get_json_object("document", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Ccy"))
-            .withColumn("dbtr_mmb_id",    F.get_json_object("document", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAgt.FinInstnId.ClrSysMmbId.MmbId"))
-            .withColumn("cdtr_mmb_id",    F.get_json_object("document", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAgt.FinInstnId.ClrSysMmbId.MmbId"))
-            .withColumn("dbtr_acct_id",   F.get_json_object("document", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr.Id"))
-            .withColumn("cdtr_acct_id",   F.get_json_object("document", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr.Id"))
-            .withColumn("event_date",     F.to_date("creation_dt_tm"))
-            .withColumn("created_at_ts",  F.current_timestamp())
+            df
+            # --- GrpHdr ---
+            .withColumn("grp_msg_id",    F.col("d.FIToFICstmrCdtTrf.GrpHdr.MsgId"))
+            .withColumn("grp_cre_dt_tm", F.to_timestamp(F.col("d.FIToFICstmrCdtTrf.GrpHdr.CreDtTm")))
+            .withColumn("grp_nb_of_txs", F.col("d.FIToFICstmrCdtTrf.GrpHdr.NbOfTxs").cast("int"))
+            .withColumn("sttlm_mtd",     F.col("d.FIToFICstmrCdtTrf.GrpHdr.SttlmInf.SttlmMtd"))
+
+            # --- CdtTrfTxInf ---
+            .withColumn("tx_type",       F.lit("pacs.008.001.10"))
+            .withColumn("pmt_instr_id",  F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.PmtId.InstrId"))
+            .withColumn("pmt_e2e_id",    F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.PmtId.EndToEndId"))
+            .withColumn("purp_cd",       F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.Purp.Cd"))
+            .withColumn("chrg_br",       F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.ChrgBr"))
+            .withColumn("rmt_ustrd",     F.col("d.FIToFICstmrCdtTrf.RmtInf.Ustrd"))
+
+            # --- Amounts ---
+            .withColumn("instd_amt",     F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Amt").cast("double"))
+            .withColumn("instd_ccy",     F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Ccy"))
+            .withColumn("intrbk_amt",    F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.IntrBkSttlmAmt.Amt.Amt").cast("double"))
+            .withColumn("intrbk_ccy",    F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.IntrBkSttlmAmt.Amt.Ccy"))
+            .withColumn("xchg_rate",     F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.XchgRate"))
+
+            # --- Agents ---
+            .withColumn("cdtr_agt_mmb_id", F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAgt.FinInstnId.ClrSysMmbId.MmbId"))
+            .withColumn("dbtr_agt_mmb_id", F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAgt.FinInstnId.ClrSysMmbId.MmbId"))
+
+            # --- Creditor (safe array access) ---
+            .withColumn("cdtr_name",        F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Nm"))
+            .withColumn("cdtr_id",          F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Id.PrvtId.Othr").getItem(0).getField("Id"))
+            .withColumn("cdtr_acct_id",     F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr").getItem(0).getField("Id"))
+            .withColumn("cdtr_acct_scheme", F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr").getItem(0).getField("SchmeNm").getField("Prtry"))
+            # --- Debtor ---
+            .withColumn("dbtr_name",        F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Nm"))
+            .withColumn("dbtr_id",          F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Id.PrvtId.Othr").getItem(0).getField("Id"))
+            .withColumn("dbtr_acct_id",     F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr").getItem(0).getField("Id"))
+            .withColumn("dbtr_acct_scheme", F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr").getItem(0).getField("SchmeNm").getField("Prtry"))
+
+            # --- Charges ---
+            .withColumn("charge_amt",          F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.ChrgsInf.Amt.Amt").cast("double"))
+            .withColumn("charge_ccy",          F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.ChrgsInf.Amt.Ccy"))
+            .withColumn("charge_agent_mmb_id", F.col("d.FIToFICstmrCdtTrf.CdtTrfTxInf.ChrgsInf.Agt.FinInstnId.ClrSysMmbId.MmbId"))
+
+            # --- DataCache ---
+            .withColumn("dc_cdtr_id",      F.col("d.DataCache.cdtrId"))
+            .withColumn("dc_dbtr_id",      F.col("d.DataCache.dbtrId"))
+            .withColumn("dc_cre_dt_tm",    F.to_timestamp(F.col("d.DataCache.creDtTm")))
+            .withColumn("dc_instd_amt",    F.col("d.DataCache.instdAmt.amt").cast("double"))
+            .withColumn("dc_instd_ccy",    F.col("d.DataCache.instdAmt.ccy"))
+            .withColumn("dc_xchg_rate",    F.col("d.DataCache.xchgRate"))
+            .withColumn("dc_cdtr_acct_id", F.col("d.DataCache.cdtrAcctId"))
+            .withColumn("dc_dbtr_acct_id", F.col("d.DataCache.dbtrAcctId"))
+            .withColumn("dc_intrbk_amt",   F.col("d.DataCache.intrBkSttlmAmt.amt").cast("double"))
+            .withColumn("dc_intrbk_ccy",   F.col("d.DataCache.intrBkSttlmAmt.ccy"))
+
+            .withColumn("event_date",    F.to_date("grp_cre_dt_tm"))
+            .withColumn("created_at_ts", F.current_timestamp())
         )
 
+        # dedupe
         w = Window.partitionBy("end_to_end_id").orderBy(F.col("created_at_ts").desc())
         silver = silver.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
 
@@ -145,9 +198,8 @@ class Pacs008ETL(BaseETL):
             self.silver_path,
             self.hudi_opts("silver_pacs008", "end_to_end_id", "ingested_at_ts"),
         )
-        print(f"[Pacs008ETL] Silver written → {self.silver_path}")
         return self.silver_path
-
+    
     # ------------------------------------------------------------------
     # GOLD
     # ------------------------------------------------------------------
