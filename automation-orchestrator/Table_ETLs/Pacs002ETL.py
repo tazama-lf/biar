@@ -134,6 +134,7 @@ class Pacs002ETL(BaseETL):
             .withColumn("charge_currency_hint",  F.when(charges.isNotNull(), F.expr("element_at(array_distinct(transform(doc.FIToFIPmtSts.TxInfAndSts.ChrgsInf, x -> x.Amt.Ccy)), 1)")).otherwise(F.lit(None).cast("string")))
             .withColumn("event_ts",             F.coalesce(F.col("grp_cre_dt_tm"), F.col("credttm_ts"), F.col("dc_cre_dt_tm")))
             .withColumn("event_date",    F.to_date(F.col("event_ts")))
+            .withColumn("event_date_silver", F.to_date(F.col("event_ts")))
         )
 
         if "tx_type" not in s.columns:
