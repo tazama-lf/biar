@@ -1,5 +1,4 @@
 import os
-import subprocess
 
 c = get_config()  # noqa: F821
 

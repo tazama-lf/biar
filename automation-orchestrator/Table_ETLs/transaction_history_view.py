@@ -79,8 +79,11 @@ class TransactionHistoryViewETL(BaseETL):
         tx_type = F.coalesce(F.col("tx_type"), F.get_json_object("transaction_data", "$.TxTp"))
 
         # --- Regex helpers (work regardless of JSON nesting) ---
-        _re = lambda key, grp=1: F.regexp_extract("transaction_data", rf'"{key}"\s*:\s*"([^"]+)"', grp)
-        _re_num = lambda key, grp=1: F.regexp_extract("transaction_data", rf'"{key}"\s*:\s*([0-9.]+)', grp)
+        def _re(key, grp=1):
+            return F.regexp_extract("transaction_data", rf'"{key}"\s*:\s*"([^"]+)"', grp)
+        
+        def _re_num(key, grp=1):
+            return F.regexp_extract("transaction_data", rf'"{key}"\s*:\s*([0-9.]+)', grp)
 
         # --- Message IDs & timestamps (get_json_object FIRST to avoid "" trap) ---
         tx_msg_id = F.coalesce(
