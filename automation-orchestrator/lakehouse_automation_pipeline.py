@@ -142,9 +142,6 @@ class FullETLOrchestrator:
     ) -> tuple[str, str, str, str, str]:
         """Resolve and default all input parameters."""
         if not all([raw_path, table, bucket, object_key]):
-            bucket = bucket 
-            table = table 
-            object_key = object_key 
             raw_path = raw_path or f"s3a://{bucket}/{table}/{object_key}"
 
         source_path = raw_path

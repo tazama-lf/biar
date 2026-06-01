@@ -146,7 +146,7 @@ app = FastAPI()
 
 class TriggerRequest(BaseModel):
     raw_path:         Optional[str] = None
-    db_name:          Optional[str] = ""  
+    db_name:          Optional[str] = None  
     bucket:           Optional[str] = ""
     table:            Optional[str] = ""
     object_key:       Optional[str] = ""

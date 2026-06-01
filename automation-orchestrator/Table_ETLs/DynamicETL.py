@@ -104,7 +104,6 @@ class DynamicETL(BaseETL):
             table_name=f"{layer}_{self.hudi_table_name}",
             record_key=self._config["record_key"],
             precombine=self._config["precombine"],
-            partition=self._config["precombine"],
         )
 
     # ------------------------------------------------------------------
@@ -270,22 +269,24 @@ class DynamicETL(BaseETL):
                     df = df.select(other + expanded)
 
             # Step 2: Parse JSON strings into structs/arrays
+            # ------------------------------------------------------------------
+            # SINGLE SAMPLE: collect once for all string columns (performance fix)
+            # ------------------------------------------------------------------
+            string_fields = [f for f in df.schema.fields if isinstance(f.dataType, StringType)]
             json_string_cols = []
-            for field in df.schema.fields:
-                if isinstance(field.dataType, StringType):
-                    sample = (
-                        df.filter(F.col(field.name).isNotNull())
-                        .select(F.col(field.name))
-                        .limit(1)
-                        .collect()
-                    )
-                    if sample and len(sample) > 0:
-                        val = sample[0][0]
-                        if val and isinstance(val, str):
-                            val_stripped = val.strip()
-                            if (val_stripped.startswith('{') and val_stripped.endswith('}')) or \
-                               (val_stripped.startswith('[') and val_stripped.endswith(']')):
-                                json_string_cols.append(field.name)
+
+            if string_fields:
+                sample_cols = [F.col(f.name) for f in string_fields]
+                sample_rows = df.select(*sample_cols).limit(1).collect()
+                sample_data = sample_rows[0].asDict() if sample_rows else {}
+
+                for field in string_fields:
+                    val = sample_data.get(field.name)
+                    if val and isinstance(val, str):
+                        val_stripped = val.strip()
+                        if (val_stripped.startswith('{') and val_stripped.endswith('}')) or \
+                           (val_stripped.startswith('[') and val_stripped.endswith(']')):
+                            json_string_cols.append(field.name)
 
             if json_string_cols:
                 changed = True
@@ -293,16 +294,12 @@ class DynamicETL(BaseETL):
                     try:
                         json_schema = self.infer_json_schema(df, col_name)
                         df = df.withColumn(col_name, F.from_json(F.col(col_name), json_schema))
-                    except Exception:
-                        try:
-                            df = df.withColumn(col_name, F.from_json(F.col(col_name), "STRUCT<<*>"))
-                        except:
-                            pass
+                    except Exception as e:
+                        # Schema inference failed; leave column as string, log it
+                        print(f"[DynamicETL] Could not parse JSON column '{col_name}': {e}")
 
-            # ------------------------------------------------------------------
             # Step 2c: Sanitize column names — strip whitespace, replace invalid chars
             # Avro/Hudi doesn't allow spaces, trailing whitespace, or special chars
-            # ------------------------------------------------------------------
             rename_map = {}
             for col_name in df.columns:
                 clean = col_name.strip().replace(" ", "_").replace("-", "_")
