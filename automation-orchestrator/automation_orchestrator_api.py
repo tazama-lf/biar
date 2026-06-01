@@ -145,7 +145,8 @@ app = FastAPI()
 # ===================================================================
 
 class TriggerRequest(BaseModel):
-    raw_path:         str
+    raw_path:         Optional[str] = None
+    db_name:          Optional[str] = ""  
     bucket:           Optional[str] = ""
     table:            Optional[str] = ""
     object_key:       Optional[str] = ""
@@ -219,25 +220,17 @@ def maybe_run_views_after_full_pipeline() -> None:
 # ===================================================================
 
 def run_job(req: TriggerRequest) -> dict:
-    """
-    Execute a single ETL job via FullETLOrchestrator.
-
-    Returns the result dict produced by FullETLOrchestrator.run(), whose
-    shape is: {table, raw_path, bucket, object_key, source_path, result, views_result}.
-    The "result" key carries the status string ("All Done", "Skipped: …") —
-    matching what the original API read from automation_orchestrator_api()'s return value.
-    """
     print(f"[JOB] Starting ETL for: {req.raw_path}")
 
     spark = GLOBAL_SPARK if GLOBAL_SPARK else get_spark_session()
 
-    # Replaced: automation_orchestrator_api(spark, raw_path, bucket, table, object_key)
     result = FullETLOrchestrator(spark, DEFAULT_WAREHOUSE_ROOT).run(
         raw_path=req.raw_path,
+        db_name=req.db_name,          # NEW
         bucket=req.bucket,
         table=req.table,
         object_key=req.object_key,
-        trigger_views=False,   # Views are handled by maybe_run_views_after_full_pipeline
+        trigger_views=False,
     )
 
     print(f"[JOB] Completed ETL for: {req.raw_path}")
@@ -245,7 +238,7 @@ def run_job(req: TriggerRequest) -> dict:
         "status": "python_running",
         "result": result,
     }
-
+    
 # ===================================================================
 # BACKGROUND WORKER THREAD
 # ===================================================================
@@ -309,27 +302,23 @@ def submit(
         "execute_notebook": req.execute_notebook,
     }
 
-    # Metadata-only mode — no execution.
-    if not req.execute_notebook:
-        return {
-            "status":       "received_only",
-            "message":      "Metadata received from NiFi and written to out folder",
-            "request_file": OUTPUT_REQUEST,
-            "data":         payload,
-        }
-
-    # Queue the job and return immediately (non-blocking).
+    # ------------------------------------------------------------------
+    # Always queue the ETL job (non-blocking)
+    # ------------------------------------------------------------------
     try:
         job_queue.put(req)
-        print(f"[QUEUE] Added job: {req.raw_path} | Queue size: {job_queue.qsize()}")
+        print(f"[QUEUE] Added job: {req.raw_path or req.object_key} | Queue size: {job_queue.qsize()}")
         return {
             "status":   "queued",
             "message":  "ETL job added to queue",
             "raw_path": req.raw_path,
+            "bucket":   req.bucket,
+            "table":    req.table,
+            "data":     payload,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 # ===================================================================
 # ENTRY POINT
 # ===================================================================

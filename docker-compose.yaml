@@ -233,7 +233,7 @@ services:
     env_file:
       - .env
     ports:
-      - "${JUPYTERLAB_PORT}:8888"
+      - "${JUPYTERLAB_PORT}:8000"
     volumes:
       - ./JupyterHub/notebooks:/srv/notebooks
       - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Warehouse

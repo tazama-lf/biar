@@ -18,6 +18,7 @@ from Table_ETLs.TypologiesETL import TypologiesETL
 from Table_ETLs.CommentsETL import CommentsETL
 from Table_ETLs.EntityETL import EntityETL
 from Table_ETLs.EvaluationETL import EvaluationETL
+from Table_ETLs.DynamicETL import DynamicETL
 
 # Views orchestrator
 from Table_ETLs.views_orchestrator import ViewsOrchestrator
@@ -81,6 +82,7 @@ class FullETLOrchestrator:
     def run(
         self,
         raw_path: Optional[str] = None,
+        db_name: Optional[str] = None,
         table: Optional[str] = None,
         bucket: Optional[str] = None,
         object_key: Optional[str] = None,
@@ -104,8 +106,7 @@ class FullETLOrchestrator:
         print(f"Source Path: {source_path}")
 
         # 1. Run domain table ETL
-        etl_result = self._route_etl(table, source_path)
-
+        etl_result = self._route_etl(table, source_path, db_name=db_name)
         # 2. Optionally build views
         views_result = None
         if trigger_views:
@@ -141,15 +142,15 @@ class FullETLOrchestrator:
     ) -> tuple[str, str, str, str, str]:
         """Resolve and default all input parameters."""
         if not all([raw_path, table, bucket, object_key]):
-            bucket = bucket or "marcel"
-            table = table or "alerts"
-            object_key = object_key or "2026-04-02T13:31:25.161Z.json"
+            bucket = bucket 
+            table = table 
+            object_key = object_key 
             raw_path = raw_path or f"s3a://{bucket}/{table}/{object_key}"
 
         source_path = raw_path
         return raw_path, table, bucket, object_key, source_path
 
-    def _route_etl(self, table: str, source_path: str) -> str:
+    def _route_etl(self, table: str, source_path: str, db_name: Optional[str] = None) -> str:
         """Dispatch to the correct ETL class based on table name."""
         if table in ("pacs008", "pacs002"):
             CombinedPacsETL(self.spark, self.warehouse_root, table=table).run(source_path)
@@ -162,12 +163,20 @@ class FullETLOrchestrator:
             )
             return "Skipped: transactions are derived from PACS gold"
 
-        etl_class = self._ETL_REGISTRY.get(table)
-        if etl_class is None:
-            raise ValueError(f"Unsupported table: {table}")
+        if table in self._ETL_REGISTRY:
+            self._ETL_REGISTRY[table](self.spark, self.warehouse_root).run(source_path)
+            return "All Done"
 
-        etl_class(self.spark, self.warehouse_root).run(source_path)
-        return "All Done"
+        # FALLBACK — unknown table → DynamicETL with db_name
+        print(f"[FullETLOrchestrator] '{table}' not in ETL registry. Falling back to DynamicETL.")
+        DynamicETL(
+            self.spark,
+            self.warehouse_root,
+            db_name=db_name,
+            table=table,
+        ).run(source_path)
+        
+        return "All Done (DynamicETL fallback)"
 
     def _run_views(self) -> str:
         """Run the views orchestrator to build all available views."""
