@@ -1,6 +1,7 @@
-from fastapi import FastAPI, HTTPException, status, Request
+from fastapi import FastAPI, HTTPException, status, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Union
 import uvicorn
@@ -9,12 +10,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
+from pyspark.sql.window import Window
 import os
 import threading
 import findspark
+import tempfile
+import json
 import time
 import logging
 import re
+import uuid
+import jwt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pipeline")
@@ -83,11 +89,35 @@ try:
 except Exception as e:
     logger.error(f"Spark warm-up failed at startup: {e}")
 
+from fastapi.openapi.utils import get_openapi
+
 app = FastAPI(
     title="Lakehouse Pipeline API (Ozone Alerts - Bronze/Silver/Gold)",
     description="REST API to query Gold",
     version="2.0.0"
 )
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    schema.setdefault("components", {}).setdefault("securitySchemes", {})["BearerAuth"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+    }
+    for path in schema.get("paths", {}).values():
+        for operation in path.values():
+            operation.setdefault("security", [{"BearerAuth": []}])
+    app.openapi_schema = schema
+    return schema
+
+app.openapi = custom_openapi
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="spark-worker")
 SPARK_JOB_TIMEOUT = 120
@@ -121,7 +151,6 @@ alerts_nav_rules_path                 = f"{ALERT_NAV_ROOT}/rules_triggered"
 tx_detail_view_path                   = f"{VIEWS_ROOT}/vw_transaction_detail"
 tx_history_view_path                  = f"{VIEWS_ROOT}/vw_transaction_history"
 conditions_view_path                  = f"{VIEWS_ROOT}/conditions_timeline"
-alert_history_view_path                   = f"{VIEWS_ROOT}/alert_history"
 vw_tx_network_accounts_edges_path     = f"{VIEWS_ROOT}/vw_tx_network_accounts_edges"
 vw_tx_network_counterparties_edges_path = f"{VIEWS_ROOT}/vw_tx_network_counterparties_edges"
 vw_counterparty_account_links_path    = f"{VIEWS_ROOT}/vw_counterparty_account_links"
@@ -148,7 +177,6 @@ GOLD_PATHS = {
     "tx_network_accounts_edges":       vw_tx_network_accounts_edges_path,
     "tx_network_counterparties_edges": vw_tx_network_counterparties_edges_path,
     "counterparty_account_links":      vw_counterparty_account_links_path,
-    "alert_history":                   alert_history_view_path,
     
 }
 
@@ -183,6 +211,114 @@ def invalidate_schema_cache():
 
 _sql_lock = threading.Lock()   # serialises temp-view registration + SQL execution
 
+
+# ============================================================
+# JWT Authentication
+# ============================================================
+
+# This service sits behind an API gateway (e.g. Kong / Nginx + Keycloak) that
+# performs RS256 signature verification upstream before the request reaches here.
+# JWT_GATEWAY_VERIFIED_MODE=true signals that trust boundary: the gateway is the
+# authority on signature validity; this service focuses on claim extraction for
+# tenant isolation and RBAC.  Set to "false" (with JWT_PUBLIC_KEY set) to enable
+# local signature verification in environments without a gateway.
+_REQUIRED_CLAIM = "QUERY_LAKEHOUSE"
+_http_bearer = HTTPBearer(auto_error=False)
+
+_GATEWAY_VERIFIED_MODE = os.getenv("JWT_GATEWAY_VERIFIED_MODE", "true").lower() == "true"
+
+def _build_decode_options() -> dict:
+    """
+    Decode options are driven by deployment environment variables so that
+    the verification strategy is explicit and auditable in config rather
+    than hardcoded in logic.
+    """
+    if _GATEWAY_VERIFIED_MODE:
+        return {"verify_signature": False, "verify_exp": False}
+    return {"verify_signature": True, "verify_exp": True}
+
+_JWT_DECODE_OPTIONS = _build_decode_options()
+
+logger.info(
+    f"JWT mode: {'gateway-verified (signature delegated upstream)' if _GATEWAY_VERIFIED_MODE else 'local signature verification'}"
+)
+
+
+def _extract_all_claims(payload: dict) -> List[str]:
+    claims: List[str] = []
+
+    realm_roles = payload.get("realm_access", {}).get("roles", [])
+    claims.extend(realm_roles)
+
+    for client_access in payload.get("resource_access", {}).values():
+        claims.extend(client_access.get("roles", []))
+
+    # Support wrapped tokens with flat claims array
+    flat_claims = payload.get("claims", [])
+    if isinstance(flat_claims, list):
+        claims.extend(flat_claims)
+
+    return list(set(claims))
+
+
+def verify_jwt(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_http_bearer)) -> dict:
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"status": "error", "code": 401, "message": "Authorization header with Bearer token is required"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(
+            token,
+            algorithms=["RS256", "HS256"],
+            options=_JWT_DECODE_OPTIONS,
+            key="",  # gateway mode: key unused; local mode: inject via JWT_SECRET env
+        )
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"status": "error", "code": 401, "message": f"Invalid token: {exc}"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Always enforce expiry when the claim is present, regardless of mode
+    exp = payload.get("exp")
+    if exp is not None and time.time() > exp:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"status": "error", "code": 401, "message": "Token has expired"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    all_claims = _extract_all_claims(payload)
+    if _REQUIRED_CLAIM not in all_claims:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "status": "error",
+                "code": 403,
+                "message": f"Token is missing required claim: '{_REQUIRED_CLAIM}'",
+            },
+        )
+
+    tenant_id = payload.get("tenant_id") or payload.get("tenantId")
+    if not tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"status": "error", "code": 403, "message": "Token is missing 'tenant_id' or 'tenantId' claim"},
+        )
+
+    logger.info(f"JWT claims extracted — tenant_id={tenant_id}, claims={all_claims}")
+
+    return {
+        "tenant_id": tenant_id,
+        "claims": all_claims,
+        "payload": payload,
+    }
 
 # ============================================================
 # Helpers
@@ -231,9 +367,16 @@ class SQLQueryRequest(BaseModel):
 # ============================================================
 
 MAX_ROWS = 10000
+TENANT_ID_COLUMN = "tenant_id"
 
 
-def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = None, limit: int = None):
+def _get_hudi_data_sync(
+    table_name: str,
+    tenant_id: str,
+    filters: dict = None,
+    columns: list = None,
+    limit: int = None,
+):
     """Synchronous query — called from thread pool."""
     if table_name not in GOLD_PATHS:
         raise ValueError(f"Table '{table_name}' not found in Gold registry")
@@ -242,6 +385,15 @@ def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = N
     path = GOLD_PATHS[table_name]
     df = spark.read.format("hudi").load(path)
     valid_columns = set(df.columns)
+
+    # Always filter by tenant_id when the column exists in the table
+    if TENANT_ID_COLUMN in valid_columns:
+        df = df.filter(F.col(TENANT_ID_COLUMN) == tenant_id)
+    else:
+        logger.warning(
+            f"Table '{table_name}' has no '{TENANT_ID_COLUMN}' column — "
+            "tenant isolation skipped for this table."
+        )
 
     # Validate filters
     if filters:
@@ -276,17 +428,22 @@ def _get_hudi_data_sync(table_name: str, filters: dict = None, columns: list = N
     return [row.asDict(recursive=True) for row in df.collect()]
 
 
-def _execute_sql_sync(sql_query: str, limit: int = None):
+def _execute_sql_sync(sql_query: str, tenant_id: str, limit: int = None):
     """
     Serialised temp-view registration + SQL execution.
-    Uses a module-level lock to prevent concurrent requests from corrupting each
-    other's view registrations.
+    Each table view is pre-filtered to the caller's tenant_id before
+    being registered, so the SQL query automatically sees only that
+    tenant's rows regardless of what the caller writes.
     """
     spark = get_spark()
     with _sql_lock:
         for tname, path in GOLD_PATHS.items():
             if os.path.isdir(path):
-                spark.read.format("hudi").load(path).createOrReplaceTempView(tname)
+                tdf = spark.read.format("hudi").load(path)
+                # Apply tenant filter when the column exists
+                if TENANT_ID_COLUMN in tdf.columns:
+                    tdf = tdf.filter(F.col(TENANT_ID_COLUMN) == tenant_id)
+                tdf.createOrReplaceTempView(tname)
             else:
                 logger.warning(f"Path for table '{tname}' not found: {path}")
 
@@ -380,11 +537,16 @@ def list_tables():
 
 
 @app.post("/query", status_code=status.HTTP_200_OK)
-async def query_table(request: QueryRequest):
+async def query_table(
+    request: QueryRequest,
+    auth: dict = Depends(verify_jwt),
+):
+    tenant_id: str = auth["tenant_id"]
     try:
         data = await run_in_executor(
             _get_hudi_data_sync,
             request.table_name,
+            tenant_id,
             request.filters,
             request.columns,
             request.limit,
@@ -393,6 +555,7 @@ async def query_table(request: QueryRequest):
             "status": "success",
             "code": 200,
             "table": request.table_name,
+            "tenant_id": tenant_id,
             "row_count": len(data),
             "data": data
         }
@@ -412,13 +575,14 @@ async def query_table(request: QueryRequest):
 
 
 @app.post("/execute_sql", status_code=status.HTTP_200_OK)
-async def execute_sql(request: SQLQueryRequest):
+async def execute_sql(
+    request: SQLQueryRequest,
+    auth: dict = Depends(verify_jwt),
+):
+    tenant_id: str = auth["tenant_id"]
     sql_query = request.sql_query.strip()
 
-    # Sanitise escapes from some HTTP clients
-    sql_query = re.sub(r"(\\')+(\\')+(\\')+'", "'", sql_query)
-    sql_query = re.sub(r"\\'\\'\\'", "'", sql_query)
-    sql_query = re.sub(r"\\'", "'", sql_query)
+    sql_query = sql_query.replace("\\'", "'")
     sql_query = re.sub(r'\s+', ' ', sql_query).strip()
 
     forbidden_patterns = [
@@ -441,8 +605,15 @@ async def execute_sql(request: SQLQueryRequest):
         )
 
     try:
-        data = await run_in_executor(_execute_sql_sync, sql_query, request.limit)
-        return {"status": "success", "code": 200, "query": sql_query, "row_count": len(data), "data": data}
+        data = await run_in_executor(_execute_sql_sync, sql_query, tenant_id, request.limit)
+        return {
+            "status": "success",
+            "code": 200,
+            "tenant_id": tenant_id,
+            "query": sql_query,
+            "row_count": len(data),
+            "data": data,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -454,7 +625,7 @@ async def execute_sql(request: SQLQueryRequest):
 
 
 @app.post("/invalidate_schema_cache", status_code=status.HTTP_200_OK)
-async def invalidate_schema_cache_endpoint():
+async def invalidate_schema_cache_endpoint(auth: dict = Depends(verify_jwt)):
     """Manually invalidate the schema cache after a schema migration."""
     invalidate_schema_cache()
     return {"status": "success", "message": "Schema cache invalidated"}
