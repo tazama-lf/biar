@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, status, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Union
 import uvicorn
@@ -10,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
-from pyspark.sql.window import Window
 import os
 import threading
 import findspark
@@ -86,7 +86,6 @@ try:
 except Exception as e:
     logger.error(f"Spark warm-up failed at startup: {e}")
 
-from fastapi.openapi.utils import get_openapi
 
 app = FastAPI(
     title="Lakehouse Pipeline API (Ozone Alerts - Bronze/Silver/Gold)",
@@ -108,9 +107,16 @@ def custom_openapi():
         "scheme": "bearer",
         "bearerFormat": "JWT",
     }
+    UNAUTHENTICATED_PATHS = {"/", "/health", "/tables"}
     for path in schema.get("paths", {}).values():
         for operation in path.values():
             operation.setdefault("security", [{"BearerAuth": []}])
+    
+    for path_key, path_val in schema.get("paths", {}).items():
+        if path_key in UNAUTHENTICATED_PATHS:
+            for operation in path_val.values():
+                operation.pop("security", None)
+                
     app.openapi_schema = schema
     return schema
 
@@ -132,13 +138,14 @@ cases_gold_path         = f"{WAREHOUSE_ROOT}/gold/cases"
 tasks_gold_path         = f"{WAREHOUSE_ROOT}/gold/tasks"
 transactions_gold_path  = f"{WAREHOUSE_ROOT}/gold/transactions"
 nmap_gold_path          = f"{WAREHOUSE_ROOT}/gold/network_map"
-rules_gold_path         = f"{WAREHOUSE_ROOT}/gold/rules"
+rules_gold_path         = f"{WAREHOUSE_ROOT}/gold/rule"
 conditions_gold_path    = f"{WAREHOUSE_ROOT}/gold/conditions"
 pacs008_gold_path       = f"{WAREHOUSE_ROOT}/gold/pacs008"
 account_holder          = f"{WAREHOUSE_ROOT}/gold/account_holder"
 evaluation              = f"{WAREHOUSE_ROOT}/gold/evaluation"
 entity_gold_path       = f"{WAREHOUSE_ROOT}/gold/entity"
 comments_gold_path     = f"{WAREHOUSE_ROOT}/gold/comments"
+typologies_bronze_path     = f"{WAREHOUSE_ROOT}/bronze/typologies"
 
 VIEWS_ROOT                            = f"{WAREHOUSE_ROOT}/views"
 ALERT_NAV_ROOT                        = f"{VIEWS_ROOT}/alert_navigator"
@@ -159,7 +166,8 @@ GOLD_PATHS = {
     "transactions":                    transactions_gold_path,
     "pacs008":                         pacs008_gold_path,
     "network_map":                     nmap_gold_path,
-    "rules":                           rules_gold_path,
+    "rule":                            rules_gold_path,
+    "typologies":                      typologies_bronze_path,
     "conditions":                      conditions_gold_path,
     "account_holder":                  account_holder,
     "evaluation":                      evaluation,
@@ -210,35 +218,15 @@ _sql_lock = threading.Lock()   # serialises temp-view registration + SQL executi
 
 
 # ============================================================
+# ============================================================
 # JWT Authentication
 # ============================================================
 
 # This service sits behind an API gateway (e.g. Kong / Nginx + Keycloak) that
-# performs RS256 signature verification upstream before the request reaches here.
-# JWT_GATEWAY_VERIFIED_MODE=true signals that trust boundary: the gateway is the
-# authority on signature validity; this service focuses on claim extraction for
-# tenant isolation and RBAC.  Set to "false" (with JWT_PUBLIC_KEY set) to enable
-# local signature verification in environments without a gateway.
+# performs signature verification upstream before the request reaches here.
+# This service only extracts claims for tenant isolation and RBAC.
 _REQUIRED_CLAIM = "QUERY_LAKEHOUSE"
 _http_bearer = HTTPBearer(auto_error=False)
-
-_GATEWAY_VERIFIED_MODE = os.getenv("JWT_GATEWAY_VERIFIED_MODE", "true").lower() == "true"
-
-def _build_decode_options() -> dict:
-    """
-    Decode options are driven by deployment environment variables so that
-    the verification strategy is explicit and auditable in config rather
-    than hardcoded in logic.
-    """
-    if _GATEWAY_VERIFIED_MODE:
-        return {"verify_signature": False, "verify_exp": False}
-    return {"verify_signature": True, "verify_exp": True}
-
-_JWT_DECODE_OPTIONS = _build_decode_options()
-
-logger.info(
-    f"JWT mode: {'gateway-verified (signature delegated upstream)' if _GATEWAY_VERIFIED_MODE else 'local signature verification'}"
-)
 
 
 def _extract_all_claims(payload: dict) -> List[str]:
@@ -272,8 +260,7 @@ def verify_jwt(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_ht
         payload = jwt.decode(
             token,
             algorithms=["RS256", "HS256"],
-            options=_JWT_DECODE_OPTIONS,
-            key="",  # gateway mode: key unused; local mode: inject via JWT_SECRET env
+            options={"verify_signature": False, "verify_exp": False},
         )
     except jwt.InvalidTokenError as exc:
         raise HTTPException(
@@ -282,7 +269,7 @@ def verify_jwt(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_ht
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Always enforce expiry when the claim is present, regardless of mode
+    # Enforce expiry when the claim is present
     exp = payload.get("exp")
     if exp is not None and time.time() > exp:
         raise HTTPException(
