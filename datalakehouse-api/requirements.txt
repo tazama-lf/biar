@@ -3,3 +3,5 @@ uvicorn[standard]
 pyspark==3.4.2
 findspark
 pydantic
+PyJWT==2.12.0
+cryptography==46.0.7
