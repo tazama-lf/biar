@@ -4,4 +4,4 @@ pyspark==3.4.2
 findspark
 pydantic
 PyJWT==2.12.0
-cryptography==44.0.3
+cryptography==45.0.4
