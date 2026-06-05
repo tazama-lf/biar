@@ -14,12 +14,9 @@ from pyspark.sql.window import Window
 import os
 import threading
 import findspark
-import tempfile
-import json
 import time
 import logging
 import re
-import uuid
 import jwt
 
 logging.basicConfig(level=logging.INFO)

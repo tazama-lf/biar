@@ -40,10 +40,10 @@ class FullETLOrchestrator:
         orchestrator = FullETLOrchestrator(spark, warehouse_root="/data/warehouse")
         
         # Run table ETL only
-        result = orchestrator.run(table="alerts", bucket="marcel", object_key="...")
+        result = orchestrator.run(table="alerts", bucket="tazama", object_key="...")
         
         # Run table ETL + build any eligible views afterwards
-        result = orchestrator.run(table="alerts", bucket="marcel", object_key="...", trigger_views=True)
+        result = orchestrator.run(table="alerts", bucket="tazama", object_key="...", trigger_views=True)
     """
 
     DEFAULT_WAREHOUSE_ROOT = "/opt/biar/test_warehouse"
