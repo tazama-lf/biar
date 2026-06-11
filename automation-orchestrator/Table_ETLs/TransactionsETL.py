@@ -70,19 +70,21 @@ class TransactionsETL(BaseETL):
     # ------------------------------------------------------------------
 
     def _transactions_from_pacs(self, df_pacs: DataFrame, source_label: str) -> DataFrame:
-        """
-        Derive canonical transaction rows from a PACS bronze DataFrame.
-
-        TxTp is extracted from the embedded JSON so the composite PK can be
-        formed immediately — no synthetic integer needed.
-        """
         created_ts    = F.coalesce(F.col("credttm_ts"), F.col("ingested_at_ts"), F.current_timestamp())
         created_at_ms = (created_ts.cast("long") * F.lit(1000)).cast("long")
 
-        if "document_json" in df_pacs.columns:
+    # Handle the schema difference between pacs008 (document_json) and pacs002 (document)
+        if "document_json" in df_pacs.columns and "document" in df_pacs.columns:
             tx_data = F.coalesce(F.col("document_json"), F.col("document").cast("string")).cast("string")
-        else:
+        elif "document_json" in df_pacs.columns:
+            tx_data = F.col("document_json").cast("string")
+        elif "document" in df_pacs.columns:
             tx_data = F.col("document").cast("string")
+        else:
+            raise ValueError(
+                f"[TransactionsETL] Neither 'document' nor 'document_json' found in {source_label} bronze. "
+                f"Available columns: {df_pacs.columns}"
+            )
 
         # Extract TxTp from the JSON payload so the PK is available at ingest time.
         tx_type_from_json = F.get_json_object(tx_data, "$.TxTp")
@@ -98,7 +100,7 @@ class TransactionsETL(BaseETL):
                 tx_type_from_json.alias("tx_type_raw"),
             )
         )
-
+    
     # ------------------------------------------------------------------
     # BRONZE
     # ------------------------------------------------------------------
