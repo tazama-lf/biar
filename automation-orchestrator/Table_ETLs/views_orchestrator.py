@@ -15,6 +15,7 @@ from Table_ETLs.alert_navigator import AlertNavigatorETL
 from Table_ETLs.network_navigator_view import NetworkNavigatorViewETL
 from Table_ETLs.transaction_detail_view import TransactionDetailViewETL
 from Table_ETLs.transaction_history_view import TransactionHistoryViewETL
+from Table_ETLs.ConditionsTimelineViewETL import ConditionsTimelineViewETL
 
 
 class ViewsOrchestrator:
@@ -99,6 +100,19 @@ class ViewsOrchestrator:
             print(
                 "[ViewsOrchestrator] Skipping alert_history "
                 "(missing gold alerts/cases/tasks or vw_transaction_detail)"
+            )
+
+        # ---- Conditions Timeline (requires gold conditions + gold transactions + gold alerts) ----
+        if (
+            self._hudi_ready(f"{self.warehouse_root}/gold/conditions")
+            and self._hudi_ready(f"{self.warehouse_root}/gold/transactions")
+            and self._hudi_ready(f"{self.warehouse_root}/gold/alerts")
+        ):
+            self._run_view(ConditionsTimelineViewETL, "conditions_timeline")
+        else:
+            print(
+                "[ViewsOrchestrator] Skipping conditions_timeline "
+                "(missing gold conditions/transactions/alerts)"
             )
 
         print("[ViewsOrchestrator] View build finished")
