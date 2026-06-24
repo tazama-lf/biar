@@ -18,6 +18,7 @@ from Table_ETLs.TypologiesETL import TypologiesETL
 from Table_ETLs.CommentsETL import CommentsETL
 from Table_ETLs.EntityETL import EntityETL
 from Table_ETLs.EvaluationETL import EvaluationETL
+from Table_ETLs.cms_usernames import CmsUsernamesETL
 from Table_ETLs.DynamicETL import DynamicETL
 
 # Views orchestrator
@@ -65,6 +66,7 @@ class FullETLOrchestrator:
         "entity": EntityETL,
         "entities": EntityETL,
         "evaluation": EvaluationETL,
+        "cms_usernames": CmsUsernamesETL,
     }
 
     def __init__(
