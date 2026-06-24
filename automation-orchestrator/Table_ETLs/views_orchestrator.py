@@ -15,7 +15,7 @@ from Table_ETLs.alert_navigator import AlertNavigatorETL
 from Table_ETLs.network_navigator_view import NetworkNavigatorViewETL
 from Table_ETLs.transaction_detail_view import TransactionDetailViewETL
 from Table_ETLs.transaction_history_view import TransactionHistoryViewETL
-from Table_ETLs.ConditionsTimelineViewETL import ConditionsTimelineViewETL
+from Table_ETLs.ConditionsTimelineView import ConditionsTimelineViewETL
 
 
 class ViewsOrchestrator:
