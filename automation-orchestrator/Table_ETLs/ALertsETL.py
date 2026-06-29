@@ -208,6 +208,31 @@ class AlertsETL(BaseETL):
             .withColumn("network_tenant_id",     F.col("network_map_obj.tenantId"))
             .withColumn("network_message_count", F.size(F.col("network_map_obj.messages")))
             .withColumn("network_message_ids",   F.expr("transform(filter(network_map_obj.messages, x -> x is not null), x -> x.id)"))
+            .withColumn(
+            "efrup_subruleref",
+            F.expr("""
+                element_at(
+                    flatten(
+                        transform(
+                            filter(
+                                alert_data_obj.tadpResult.typologyResult,
+                                t -> t is not null
+                            ),
+                            t -> transform(
+                                filter(
+                                    t.ruleResults,
+                                    r -> r is not null
+                                        AND r.id = 'EFRuP@1.0.0'
+                                ),
+                                r -> r.subRuleRef
+                            )
+                        )
+                    ),
+                    1
+                )
+            """)
+            )
+
             .select(
                 "_hoodie_commit_time", "_hoodie_commit_seqno", "_hoodie_record_key",
                 "_hoodie_partition_path", "_hoodie_file_name",
@@ -219,7 +244,7 @@ class AlertsETL(BaseETL):
                 "typology_count", "typology_ids", "typology_results", "typology_reviews",
                 "workflow_processors", "alert_thresholds", "interdiction_thresholds", "rule_count_total",
                 "rule_weights_json", "rule_id_count_distinct", "rule_weight_sum", "rule_weight_max",
-                "tx_type", "tx_tenant_id", "tx_msg_id", "tx_status", "tx_original_instr_id",
+                "tx_type", "tx_tenant_id", "tx_msg_id", "tx_status", "efrup_subruleref","tx_original_instr_id",
                 "tx_original_e2e_id", "instg_mmb_id", "instd_mmb_id",
                 "charge_count", "charge_agent_mmb_ids", "charge_amounts", "charge_ccys",
                 "network_cfg", "network_active", "network_tenant_id",
@@ -343,7 +368,7 @@ class AlertsETL(BaseETL):
         gold = g.select(
             "event_date", "alert_id", "case_id", "tenant_id", "priority_norm", "priority_score",
             "alert_type_norm", "prediction_outcome_norm", "source", "txtp", "event_ts", "created_at_ts",
-            "alert_status", "evaluation_id", "tx_type", "tx_msg_id", "tx_status", "tx_amount", "tx_ccy",
+            "alert_status", "evaluation_id", "tx_type", "tx_msg_id", "tx_status", "efrup_subruleref", "tx_amount", "tx_ccy",
             "tx_original_e2e_id", "typology_count", "typology_id", "rule_count_total",
             "rule_id_count_distinct", "rule_weight_sum", "rule_weight_max", "rule_weight_min",
             "rule_weight_avg", "rule_weight_p95", "top_rule_id", "top_rule_weight",
