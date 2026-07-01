@@ -269,7 +269,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           secrets: |
-            GH_TOKEN=${{ secrets.GH_TOKEN }}
+            GH_TOKEN=${{ secrets.GH_TOKEN_LIB }}
 
       - name: Generate artifact attestation
         continue-on-error: true
