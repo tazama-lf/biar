@@ -1,6 +1,6 @@
 {
   "name": "biar-api",
-  "version": "1.0.0",
+  "version": "4.0.0-rc.0",
   "description": "BIAR Document Processing API with CouchDB, Apache Tika, and Solr",
   "main": "dist/job.js",
   "scripts": {
