@@ -233,7 +233,7 @@ class AlertNavigatorETL(BaseETL):
 
         rule_schema = self.infer_json_schema(b_rules, "rule_configuration_json")
 
-        return (
+        rule_meta = (
             b_rules.withColumn(
                 "rule_obj",
                 F.from_json("rule_configuration_json", rule_schema),
@@ -245,6 +245,7 @@ class AlertNavigatorETL(BaseETL):
                 F.col("cfg_tenant_id"),
                 F.col("cfg_rule_id"),
                 F.col("cfg_rule_cfg"),
+                F.col("rule_metadata_ingested_at_ts"),
                 F.col("rule_obj.desc").cast("string").alias("rule_desc"),
                 F.coalesce(F.size("bands_arr"), F.lit(0)).cast("int").alias("band_count"),
                 F.coalesce(F.size("exit_conditions_arr"), F.lit(0))
@@ -291,7 +292,16 @@ class AlertNavigatorETL(BaseETL):
                 F.col("bands_arr"),
                 F.col("exit_conditions_arr"),
             )
-            .dropDuplicates(["cfg_tenant_id", "cfg_rule_id", "cfg_rule_cfg"])
+        )
+
+        w = Window.partitionBy(
+            "cfg_tenant_id", "cfg_rule_id", "cfg_rule_cfg"
+        ).orderBy(F.col("rule_metadata_ingested_at_ts").desc_nulls_last())
+
+        return (
+            rule_meta.withColumn("rule_metadata_rn", F.row_number().over(w))
+            .filter(F.col("rule_metadata_rn") == 1)
+            .drop("rule_metadata_rn", "rule_metadata_ingested_at_ts")
         )
 
     def _build_rules(self, a: DataFrame, b_rules: DataFrame | None) -> DataFrame:
@@ -567,6 +577,7 @@ class AlertNavigatorETL(BaseETL):
                 F.col("rule_id").alias("cfg_rule_id"),
                 F.col("rule_cfg").alias("cfg_rule_cfg"),
                 F.col("configuration").alias("rule_configuration_json"),
+                F.col("ingested_at_ts").alias("rule_metadata_ingested_at_ts"),
             )
 
         # -- infer alert schema and parse ------------------------------------

@@ -145,7 +145,7 @@ account_holder          = f"{WAREHOUSE_ROOT}/gold/account_holder"
 evaluation              = f"{WAREHOUSE_ROOT}/gold/evaluation"
 entity_gold_path       = f"{WAREHOUSE_ROOT}/gold/entity"
 comments_gold_path     = f"{WAREHOUSE_ROOT}/gold/comments"
-typologies_bronze_path     = f"{WAREHOUSE_ROOT}/gold/typologies"
+typologies_gold_path     = f"{WAREHOUSE_ROOT}/gold/typologies"
 rules_bronze_path         = f"{WAREHOUSE_ROOT}/bronze/rule"
 typologies_bronze_path         = f"{WAREHOUSE_ROOT}/bronze/typologies"
 alerts_bronze_path         = f"{WAREHOUSE_ROOT}/bronze/alerts"
@@ -170,7 +170,7 @@ GOLD_PATHS = {
     "pacs008":                         pacs008_gold_path,
     "network_map":                     nmap_gold_path,
     "rule":                            rules_gold_path,
-    "typologies":                      typologies_bronze_path,
+    "typologies":                      typologies_gold_path,
     "conditions":                      conditions_gold_path,
     "account_holder":                  account_holder,
     "evaluation":                      evaluation,
