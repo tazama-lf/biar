@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
 from .BaseETL import BaseETL
 
@@ -225,7 +226,75 @@ class AlertNavigatorETL(BaseETL):
             .withColumn("ingested_at_ts", F.current_timestamp())
         )
 
-    def _build_rules(self, a: DataFrame) -> DataFrame:
+    def _prepare_rule_metadata(self, b_rules: DataFrame | None) -> DataFrame | None:
+        """Parse bronze rules into compact metadata for rules triggered by alerts."""
+        if b_rules is None:
+            return None
+
+        rule_schema = self.infer_json_schema(b_rules, "rule_configuration_json")
+
+        return (
+            b_rules.withColumn(
+                "rule_obj",
+                F.from_json("rule_configuration_json", rule_schema),
+            )
+            .withColumn("bands_arr", F.col("rule_obj.config.bands"))
+            .withColumn("exit_conditions_arr", F.col("rule_obj.config.exitConditions"))
+            .select(
+                F.upper(F.col("cfg_tenant_id")).alias("cfg_tenant_id_norm"),
+                F.col("cfg_tenant_id"),
+                F.col("cfg_rule_id"),
+                F.col("cfg_rule_cfg"),
+                F.col("rule_obj.desc").cast("string").alias("rule_desc"),
+                F.coalesce(F.size("bands_arr"), F.lit(0)).cast("int").alias("band_count"),
+                F.coalesce(F.size("exit_conditions_arr"), F.lit(0))
+                .cast("int")
+                .alias("exit_condition_count"),
+                F.to_json(F.expr("transform(bands_arr, x -> x.reason)")).alias(
+                    "band_reasons_json"
+                ),
+                F.to_json(F.expr("transform(bands_arr, x -> x.subRuleRef)")).alias(
+                    "band_sub_rule_refs_json"
+                ),
+                F.to_json(
+                    F.expr(
+                        """
+                        transform(
+                            bands_arr,
+                            x -> named_struct(
+                                'subRuleRef', x.subRuleRef,
+                                'reason', x.reason
+                            )
+                        )
+                        """
+                    )
+                ).alias("band_reasons_with_sub_rule_refs_json"),
+                F.to_json(F.expr("transform(exit_conditions_arr, x -> x.reason)")).alias(
+                    "exit_condition_reasons_json"
+                ),
+                F.to_json(
+                    F.expr("transform(exit_conditions_arr, x -> x.subRuleRef)")
+                ).alias("exit_condition_sub_rule_refs_json"),
+                F.to_json(
+                    F.expr(
+                        """
+                        transform(
+                            exit_conditions_arr,
+                            x -> named_struct(
+                                'subRuleRef', x.subRuleRef,
+                                'reason', x.reason
+                            )
+                        )
+                        """
+                    )
+                ).alias("exit_condition_reasons_with_sub_rule_refs_json"),
+                F.col("bands_arr"),
+                F.col("exit_conditions_arr"),
+            )
+            .dropDuplicates(["cfg_tenant_id", "cfg_rule_id", "cfg_rule_cfg"])
+        )
+
+    def _build_rules(self, a: DataFrame, b_rules: DataFrame | None) -> DataFrame:
         """Build the alerts_nav_rules view."""
         rules = (
             a.select(
@@ -265,7 +334,7 @@ class AlertNavigatorETL(BaseETL):
             )
         )
 
-        return (
+        rules = (
             rules.withColumn(
                 "pk",
                 F.sha2(
@@ -273,7 +342,9 @@ class AlertNavigatorETL(BaseETL):
                         "||",
                         F.col("alert_id"),
                         F.col("typology_id"),
+                        F.coalesce(F.col("typology_cfg"), F.lit("")),
                         F.col("rule_id"),
+                        F.coalesce(F.col("rule_cfg"), F.lit("")),
                         F.coalesce(F.col("rule_sub_ref"), F.lit("")),
                     ),
                     256,
@@ -284,6 +355,67 @@ class AlertNavigatorETL(BaseETL):
                 F.coalesce(F.col("alert_timestamp"), F.current_timestamp()),
             )
             .withColumn("ingested_at_ts", F.current_timestamp())
+        )
+
+        rule_meta = self._prepare_rule_metadata(b_rules)
+        if rule_meta is None:
+            return rules
+
+        rules = (
+            rules.withColumn("tenant_id_norm", F.upper(F.col("tenant_id")))
+            .join(
+                rule_meta,
+                (F.col("rule_id") == F.col("cfg_rule_id"))
+                & (F.col("rule_cfg") == F.col("cfg_rule_cfg"))
+                & (
+                    (F.col("tenant_id_norm") == F.col("cfg_tenant_id_norm"))
+                    | (F.col("cfg_tenant_id_norm") == F.lit("DEFAULT"))
+                ),
+                "left",
+            )
+            .withColumn(
+                "rule_metadata_rank",
+                F.when(F.col("tenant_id_norm") == F.col("cfg_tenant_id_norm"), F.lit(0))
+                .when(F.col("cfg_tenant_id_norm") == F.lit("DEFAULT"), F.lit(1))
+                .otherwise(F.lit(2)),
+            )
+        )
+
+        w = Window.partitionBy("pk").orderBy(F.col("rule_metadata_rank"))
+
+        return (
+            rules.withColumn("rn", F.row_number().over(w))
+            .filter(F.col("rn") == 1)
+            .withColumn(
+                "matched_band_reason",
+                F.expr(
+                    "element_at(transform(filter(bands_arr, x -> x.subRuleRef = rule_sub_ref), x -> x.reason), 1)"
+                ),
+            )
+            .withColumn(
+                "matched_exit_condition_reason",
+                F.expr(
+                    "element_at(transform(filter(exit_conditions_arr, x -> x.subRuleRef = rule_sub_ref), x -> x.reason), 1)"
+                ),
+            )
+            .withColumn(
+                "matched_rule_reason",
+                F.coalesce(
+                    F.col("matched_band_reason"),
+                    F.col("matched_exit_condition_reason"),
+                ),
+            )
+            .drop(
+                "rn",
+                "tenant_id_norm",
+                "cfg_tenant_id_norm",
+                "cfg_tenant_id",
+                "cfg_rule_id",
+                "cfg_rule_cfg",
+                "bands_arr",
+                "exit_conditions_arr",
+                "rule_metadata_rank",
+            )
         )
 
     def _build_network_eval(
@@ -396,6 +528,7 @@ class AlertNavigatorETL(BaseETL):
         transactions_gold_path = f"{self.warehouse_root}/gold/transactions"
         typologies_bronze_path = f"{self.warehouse_root}/bronze/typologies"
         network_map_bronze_path = f"{self.warehouse_root}/bronze/network_map"
+        rules_bronze_path = f"{self.warehouse_root}/bronze/rule"
 
         s_alerts = self.spark.read.format("hudi").load(silver_alerts_path)
 
@@ -427,6 +560,15 @@ class AlertNavigatorETL(BaseETL):
                 F.col("configuration").alias("network_configuration_json"),
             )
 
+        b_rules = self._safe_load(rules_bronze_path)
+        if b_rules is not None:
+            b_rules = b_rules.select(
+                F.col("tenant_id").alias("cfg_tenant_id"),
+                F.col("rule_id").alias("cfg_rule_id"),
+                F.col("rule_cfg").alias("cfg_rule_cfg"),
+                F.col("configuration").alias("rule_configuration_json"),
+            )
+
         # -- infer alert schema and parse ------------------------------------
         alert_schema = self.infer_json_schema(s_alerts, "alert_data")
         a = s_alerts.withColumn("alert_data_obj", F.from_json("alert_data", alert_schema))
@@ -434,7 +576,7 @@ class AlertNavigatorETL(BaseETL):
         # -- build views -------------------------------------------------------
         alerts_nav_header = self._build_header(a, g_tx)
         typ = self._build_typologies(a, b_typ)
-        rules = self._build_rules(a)
+        rules = self._build_rules(a, b_rules)
         network_eval = self._build_network_eval(alerts_nav_header, b_net)
 
         # -- write views -------------------------------------------------------
