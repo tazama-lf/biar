@@ -56,8 +56,8 @@ class CommentsETL(BaseETL):
         bronze_in = self.spark.read.format("hudi").load(self.bronze_path)
 
         # created_at / updated_at are stored as epoch microseconds
-        created_ts = F.to_timestamp((F.col("created_at").cast("double") / F.lit(1_000_000)))
-        updated_ts = F.to_timestamp((F.col("updated_at").cast("double") / F.lit(1_000_000)))
+        created_ts = F.to_timestamp((F.col("created_at").cast("double") / F.lit(1_000)))
+        updated_ts = F.to_timestamp((F.col("updated_at").cast("double") / F.lit(1_000)))
 
         silver = (
             bronze_in
