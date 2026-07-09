@@ -61,6 +61,7 @@ class TypologiesETL(BaseETL):
             .withColumn("typology_obj",              F.from_json(F.col("configuration_json"), typ_schema))
             .withColumn("typology_id_in_json",        F.col("typology_obj").getField("id"))
             .withColumn("typology_cfg_in_json",       F.col("typology_obj").getField("cfg"))
+            .withColumn("typology_name",              F.col("typology_obj").getField("typology_name").cast("string"))
             .withColumn("flow_processor",             F.col("typology_obj").getField("workflow").getField("flowProcessor"))
             .withColumn("alert_threshold",            F.col("typology_obj").getField("workflow").getField("alertThreshold").cast("int"))
             .withColumn("interdiction_threshold",     F.col("typology_obj").getField("workflow").getField("interdictionThreshold").cast("int"))
@@ -135,6 +136,7 @@ class TypologiesETL(BaseETL):
             F.col("typology_cfg").cast("string"),
             F.col("typology_id_in_json").cast("string"),
             F.col("typology_cfg_in_json").cast("string"),
+            F.col("typology_name").cast("string"),
             F.col("flow_processor").cast("string"),
             F.col("alert_threshold").cast("int"),
             F.col("interdiction_threshold").cast("int"),

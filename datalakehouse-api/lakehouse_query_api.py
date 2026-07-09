@@ -185,9 +185,9 @@ GOLD_PATHS = {
     "tx_network_accounts_edges":       vw_tx_network_accounts_edges_path,
     "tx_network_counterparties_edges": vw_tx_network_counterparties_edges_path,
     "counterparty_account_links":      vw_counterparty_account_links_path,
-    "bronze_alerts":                      alerts_bronze_path,
-    "rules_bronze":                       rules_bronze_path,
-    "typologies_bronze":                  typologies_bronze_path,
+    "alerts_bronze":                   alerts_bronze_path,
+    "rules_bronze":                    rules_bronze_path,
+    "typologies_bronze":               typologies_bronze_path,
     
 }
 
