@@ -103,6 +103,7 @@ class TransactionHistoryViewETL(BaseETL):
 
         joined = base_tx
         if p8 is not None:
+            p8 = p8.dropDuplicates(["p8_end_to_end_id"])
             joined = joined.join(p8, joined.end_to_end_id == p8.p8_end_to_end_id, "left")
 
         joined = self.ensure_columns(

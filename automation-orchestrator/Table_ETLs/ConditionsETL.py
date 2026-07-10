@@ -51,7 +51,7 @@ class ConditionsETL(BaseETL):
             .withColumn("_row_payload_json", F.to_json(F.struct("*")))
         )
 
-        self.write_hudi(bronze, self.bronze_path, self.hudi_opts("bronze_conditions", "record_hash", "created_at_ts"))
+        self.write_hudi(bronze, self.bronze_path, self.hudi_opts("bronze_condition", "record_hash", "created_at_ts"))
         print(f"[ConditionsETL] Bronze written → {self.bronze_path}")
         return self.bronze_path
 
@@ -156,7 +156,7 @@ class ConditionsETL(BaseETL):
         w = Window.partitionBy("pk").orderBy(F.col("created_at_ts").desc_nulls_last())
         silver = silver.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
 
-        self.write_hudi(silver, self.silver_path, self.hudi_opts("silver_conditions", "pk", "created_at_ts"))
+        self.write_hudi(silver, self.silver_path, self.hudi_opts("silver_condition", "pk", "created_at_ts"))
         print(f"[ConditionsETL] Silver written → {self.silver_path}")
         return self.silver_path
 
@@ -212,7 +212,7 @@ class ConditionsETL(BaseETL):
         if bad:
             raise RuntimeError(f"[ConditionsETL] Gold contains non-scalar columns: {bad}")
 
-        self.write_hudi(gold, self.gold_path, self.hudi_opts("conditions", "pk", "ingested_at_ts"))
+        self.write_hudi(gold, self.gold_path, self.hudi_opts("condition", "pk", "ingested_at_ts"))
         print(f"[ConditionsETL] Gold written → {self.gold_path}")
         return self.gold_path
 

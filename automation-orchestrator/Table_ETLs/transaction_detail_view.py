@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
 from .BaseETL import BaseETL
 
@@ -132,6 +133,7 @@ class TransactionDetailViewETL(BaseETL):
                 F.col("charge_count").cast("int").alias("p2_charge_count"),
                 F.col("charge_total_amount").cast("double").alias("p2_charge_total_amount"),
                 F.col("charge_currency_hint").cast("string").alias("p2_charge_currency"),
+                F.col("ingested_at_ts").cast("timestamp").alias("p2_ingested_at_ts"),
             ],
         )
 
@@ -139,7 +141,13 @@ class TransactionDetailViewETL(BaseETL):
         if p8 is not None:
             joined = joined.join(p8, joined.end_to_end_id == p8.p8_end_to_end_id, "left")
         if p2 is not None:
-            joined = joined.join(p2, joined.tx_msg_id == p2.p2_message_id, "left")
+            w = Window.partitionBy("p2_tx_tenant_id", "p2_message_id").orderBy(F.col("p2_ingested_at_ts").desc_nulls_last())
+            p2 = p2.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
+            joined = joined.join(
+                p2,
+                (joined.tx_msg_id == p2.p2_message_id) & (joined.tx_tenant_id == p2.p2_tx_tenant_id),
+                "left",
+            )
 
         joined = self.ensure_columns(
             joined,
@@ -166,6 +174,7 @@ class TransactionDetailViewETL(BaseETL):
                 "p2_charge_count": "int",
                 "p2_charge_total_amount": "double",
                 "p2_charge_currency": "string",
+                "p2_ingested_at_ts": "timestamp",
             },
         )
 
