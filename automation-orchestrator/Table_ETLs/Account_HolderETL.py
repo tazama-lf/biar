@@ -34,11 +34,14 @@ class AccountHolderETL(BaseETL):
  
     def silver(self) -> str:
         df = self.spark.read.format("hudi").load(self.bronze_path)
+        account_holder_created_ts = F.to_timestamp(
+            F.col("credttm").cast("double") / F.lit(1_000)
+        )
         silver = (
             df
             .withColumn("tenant_id",        F.col("tenantid"))
-            .withColumn("event_ts",         F.to_timestamp(F.col("credttm")))
-            .withColumn("event_date",       F.to_date(F.to_timestamp(F.col("credttm"))))
+            .withColumn("event_ts",         account_holder_created_ts)
+            .withColumn("event_date",       F.to_date(account_holder_created_ts))
             .withColumn("account_id",       F.col("destination"))
             .withColumn("counterparty_id",  F.col("source"))
             .withColumn("pk", F.sha2(F.concat_ws("||",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
 from .BaseETL import BaseETL
 
@@ -91,6 +92,7 @@ class AlertNavigatorETL(BaseETL):
                 F.col("case_id").cast("long").alias("case_id"),
                 F.col("tx_msg_id").cast("string").alias("tx_msg_id"),
                 F.col("tx_type").cast("string").alias("tx_type"),
+                F.trim(F.col("tx_original_e2e_id").cast("string")).alias("_payment_bridge_e2e"),
                 F.col("event_ts").cast("timestamp").alias("alert_timestamp"),
                 F.to_date("event_ts").alias("alert_date"),
                 F.col("message").cast("string").alias("alert_reason"),
@@ -106,44 +108,51 @@ class AlertNavigatorETL(BaseETL):
         )
 
         if g_tx is not None:
-            # pacs002: alert-triggering message (no amount), keep its identifiers
-            pacs002 = g_tx.alias("pacs002").filter(
-                F.col("tx_amount").isNull()
-            ).select(
+            # Alert-triggering transaction row. Status now comes from Ozone txsts.
+            tx_by_msg = g_tx.select(
                 F.trim(F.col("tx_msg_id").cast("string")).alias("tx_msg_id"),
-                F.trim(F.col("end_to_end_id").cast("string")).alias("end_to_end_id"),
-                F.trim(F.col("transaction_id").cast("string")).alias("transaction_id"),
-            )
-
-            # pacs008: settlement message with amount
-            pacs008 = g_tx.alias("pacs008").filter(
-                F.col("tx_amount").isNotNull()
-            ).select(
-                F.trim(F.col("end_to_end_id").cast("string")).alias("end_to_end_id"),
-                F.col("tx_status").cast("string").alias("tx_status"),
-                F.col("tx_amount").cast("decimal(18,2)").alias("tx_amount"),
-                F.col("tx_ccy").cast("string").alias("tx_ccy"),
-            )
-
-            # Bridge: pacs002 → pacs008 via end_to_end_id
-            g_tx_lookup = pacs002.join(
-                pacs008,
-                on="end_to_end_id",
-                how="inner",
-            ).select(
-                "tx_msg_id",
-                "end_to_end_id",
-                "transaction_id",
-                "tx_status",
-                "tx_amount",
-                "tx_ccy",
+                F.trim(F.col("end_to_end_id").cast("string")).alias("msg_end_to_end_id"),
+                F.trim(F.col("transaction_id").cast("string")).alias("msg_transaction_id"),
+                F.col("tx_status").cast("string").alias("msg_tx_status"),
+                F.col("tx_amount").cast("decimal(18,2)").alias("msg_tx_amount"),
+                F.col("tx_ccy").cast("string").alias("msg_tx_ccy"),
             ).dropDuplicates(["tx_msg_id"])
 
+            # Payment row for amount/currency enrichment by original/end-to-end id.
+            tx_by_e2e = g_tx.filter(
+                (F.col("tx_type").isin("pacs.008.001.10", "pain.001.001.11"))
+                | F.col("tx_amount").isNotNull()
+            ).select(
+                F.trim(F.col("end_to_end_id").cast("string")).alias("lookup_end_to_end_id"),
+                F.trim(F.col("transaction_id").cast("string")).alias("e2e_transaction_id"),
+                F.col("tx_amount").cast("decimal(18,2)").alias("e2e_tx_amount"),
+                F.col("tx_ccy").cast("string").alias("e2e_tx_ccy"),
+            ).dropDuplicates(["lookup_end_to_end_id"])
+
             header = (
-                header.join(g_tx_lookup, on="tx_msg_id", how="left")
-                .withColumnRenamed("tx_status", "transaction_status")
-                .withColumnRenamed("tx_amount", "transaction_amount")
-                .withColumnRenamed("tx_ccy", "transaction_currency")
+                header.join(tx_by_msg, on="tx_msg_id", how="left")
+                .withColumn(
+                    "_payment_bridge_e2e",
+                    F.coalesce(F.col("_payment_bridge_e2e"), F.col("msg_end_to_end_id")),
+                )
+                .join(
+                    tx_by_e2e,
+                    F.col("_payment_bridge_e2e") == F.col("lookup_end_to_end_id"),
+                    "left",
+                )
+                .withColumn("transaction_status", F.col("msg_tx_status"))
+                .withColumn(
+                    "transaction_id",
+                    F.coalesce(F.col("msg_transaction_id"), F.col("e2e_transaction_id")),
+                )
+                .withColumn(
+                    "transaction_amount",
+                    F.coalesce(F.col("msg_tx_amount"), F.col("e2e_tx_amount")),
+                )
+                .withColumn(
+                    "transaction_currency",
+                    F.coalesce(F.col("msg_tx_ccy"), F.col("e2e_tx_ccy")),
+                )
                 .withColumn(
                     "block_or_override_status",
                     F.when(
@@ -156,9 +165,21 @@ class AlertNavigatorETL(BaseETL):
                     )
                     .otherwise(F.lit(None)),
                 )
+                .drop(
+                    "_payment_bridge_e2e",
+                    "msg_end_to_end_id",
+                    "msg_transaction_id",
+                    "msg_tx_status",
+                    "msg_tx_amount",
+                    "msg_tx_ccy",
+                    "lookup_end_to_end_id",
+                    "e2e_transaction_id",
+                    "e2e_tx_amount",
+                    "e2e_tx_ccy",
+                )
             )
 
-        return header
+        return header.drop("_payment_bridge_e2e")
           
     def _build_typologies(self, a: DataFrame, b_typ: DataFrame | None) -> DataFrame:
         """Build the alerts_nav_typologies view."""
@@ -225,7 +246,85 @@ class AlertNavigatorETL(BaseETL):
             .withColumn("ingested_at_ts", F.current_timestamp())
         )
 
-    def _build_rules(self, a: DataFrame) -> DataFrame:
+    def _prepare_rule_metadata(self, b_rules: DataFrame | None) -> DataFrame | None:
+        """Parse bronze rules into compact metadata for rules triggered by alerts."""
+        if b_rules is None:
+            return None
+
+        rule_schema = self.infer_json_schema(b_rules, "rule_configuration_json")
+
+        rule_meta = (
+            b_rules.withColumn(
+                "rule_obj",
+                F.from_json("rule_configuration_json", rule_schema),
+            )
+            .withColumn("bands_arr", F.col("rule_obj.config.bands"))
+            .withColumn("exit_conditions_arr", F.col("rule_obj.config.exitConditions"))
+            .select(
+                F.upper(F.col("cfg_tenant_id")).alias("cfg_tenant_id_norm"),
+                F.col("cfg_tenant_id"),
+                F.col("cfg_rule_id"),
+                F.col("cfg_rule_cfg"),
+                F.col("rule_metadata_ingested_at_ts"),
+                F.col("rule_obj.desc").cast("string").alias("rule_desc"),
+                F.coalesce(F.size("bands_arr"), F.lit(0)).cast("int").alias("band_count"),
+                F.coalesce(F.size("exit_conditions_arr"), F.lit(0))
+                .cast("int")
+                .alias("exit_condition_count"),
+                F.to_json(F.expr("transform(bands_arr, x -> x.reason)")).alias(
+                    "band_reasons_json"
+                ),
+                F.to_json(F.expr("transform(bands_arr, x -> x.subRuleRef)")).alias(
+                    "band_sub_rule_refs_json"
+                ),
+                F.to_json(
+                    F.expr(
+                        """
+                        transform(
+                            bands_arr,
+                            x -> named_struct(
+                                'subRuleRef', x.subRuleRef,
+                                'reason', x.reason
+                            )
+                        )
+                        """
+                    )
+                ).alias("band_reasons_with_sub_rule_refs_json"),
+                F.to_json(F.expr("transform(exit_conditions_arr, x -> x.reason)")).alias(
+                    "exit_condition_reasons_json"
+                ),
+                F.to_json(
+                    F.expr("transform(exit_conditions_arr, x -> x.subRuleRef)")
+                ).alias("exit_condition_sub_rule_refs_json"),
+                F.to_json(
+                    F.expr(
+                        """
+                        transform(
+                            exit_conditions_arr,
+                            x -> named_struct(
+                                'subRuleRef', x.subRuleRef,
+                                'reason', x.reason
+                            )
+                        )
+                        """
+                    )
+                ).alias("exit_condition_reasons_with_sub_rule_refs_json"),
+                F.col("bands_arr"),
+                F.col("exit_conditions_arr"),
+            )
+        )
+
+        w = Window.partitionBy(
+            "cfg_tenant_id", "cfg_rule_id", "cfg_rule_cfg"
+        ).orderBy(F.col("rule_metadata_ingested_at_ts").desc_nulls_last())
+
+        return (
+            rule_meta.withColumn("rule_metadata_rn", F.row_number().over(w))
+            .filter(F.col("rule_metadata_rn") == 1)
+            .drop("rule_metadata_rn", "rule_metadata_ingested_at_ts")
+        )
+
+    def _build_rules(self, a: DataFrame, b_rules: DataFrame | None) -> DataFrame:
         """Build the alerts_nav_rules view."""
         rules = (
             a.select(
@@ -265,7 +364,7 @@ class AlertNavigatorETL(BaseETL):
             )
         )
 
-        return (
+        rules = (
             rules.withColumn(
                 "pk",
                 F.sha2(
@@ -273,7 +372,9 @@ class AlertNavigatorETL(BaseETL):
                         "||",
                         F.col("alert_id"),
                         F.col("typology_id"),
+                        F.coalesce(F.col("typology_cfg"), F.lit("")),
                         F.col("rule_id"),
+                        F.coalesce(F.col("rule_cfg"), F.lit("")),
                         F.coalesce(F.col("rule_sub_ref"), F.lit("")),
                     ),
                     256,
@@ -284,6 +385,67 @@ class AlertNavigatorETL(BaseETL):
                 F.coalesce(F.col("alert_timestamp"), F.current_timestamp()),
             )
             .withColumn("ingested_at_ts", F.current_timestamp())
+        )
+
+        rule_meta = self._prepare_rule_metadata(b_rules)
+        if rule_meta is None:
+            return rules
+
+        rules = (
+            rules.withColumn("tenant_id_norm", F.upper(F.col("tenant_id")))
+            .join(
+                rule_meta,
+                (F.col("rule_id") == F.col("cfg_rule_id"))
+                & (F.col("rule_cfg") == F.col("cfg_rule_cfg"))
+                & (
+                    (F.col("tenant_id_norm") == F.col("cfg_tenant_id_norm"))
+                    | (F.col("cfg_tenant_id_norm") == F.lit("DEFAULT"))
+                ),
+                "left",
+            )
+            .withColumn(
+                "rule_metadata_rank",
+                F.when(F.col("tenant_id_norm") == F.col("cfg_tenant_id_norm"), F.lit(0))
+                .when(F.col("cfg_tenant_id_norm") == F.lit("DEFAULT"), F.lit(1))
+                .otherwise(F.lit(2)),
+            )
+        )
+
+        w = Window.partitionBy("pk").orderBy(F.col("rule_metadata_rank"))
+
+        return (
+            rules.withColumn("rn", F.row_number().over(w))
+            .filter(F.col("rn") == 1)
+            .withColumn(
+                "matched_band_reason",
+                F.expr(
+                    "element_at(transform(filter(bands_arr, x -> x.subRuleRef = rule_sub_ref), x -> x.reason), 1)"
+                ),
+            )
+            .withColumn(
+                "matched_exit_condition_reason",
+                F.expr(
+                    "element_at(transform(filter(exit_conditions_arr, x -> x.subRuleRef = rule_sub_ref), x -> x.reason), 1)"
+                ),
+            )
+            .withColumn(
+                "matched_rule_reason",
+                F.coalesce(
+                    F.col("matched_band_reason"),
+                    F.col("matched_exit_condition_reason"),
+                ),
+            )
+            .drop(
+                "rn",
+                "tenant_id_norm",
+                "cfg_tenant_id_norm",
+                "cfg_tenant_id",
+                "cfg_rule_id",
+                "cfg_rule_cfg",
+                "bands_arr",
+                "exit_conditions_arr",
+                "rule_metadata_rank",
+            )
         )
 
     def _build_network_eval(
@@ -396,18 +558,20 @@ class AlertNavigatorETL(BaseETL):
         transactions_gold_path = f"{self.warehouse_root}/gold/transactions"
         typologies_bronze_path = f"{self.warehouse_root}/bronze/typologies"
         network_map_bronze_path = f"{self.warehouse_root}/bronze/network_map"
+        rules_bronze_path = f"{self.warehouse_root}/bronze/rule"
 
         s_alerts = self.spark.read.format("hudi").load(silver_alerts_path)
 
         g_tx = self._safe_load(
             transactions_gold_path,
             select_expr=[
-                "tx_msg_id",
-                "tx_status",
-                "tx_amount",
-                "tx_ccy",
-                "transaction_id",
-                "end_to_end_id",
+                F.col("msgid").cast("string").alias("tx_msg_id"),
+                F.col("txsts").cast("string").alias("tx_status"),
+                F.col("amt").cast("double").alias("tx_amount"),
+                F.col("ccy").cast("string").alias("tx_ccy"),
+                F.col("txtp").cast("string").alias("tx_type"),
+                F.col("transaction_id").cast("string").alias("transaction_id"),
+                F.col("endtoendid").cast("string").alias("end_to_end_id"),
             ],
         )
 
@@ -427,6 +591,16 @@ class AlertNavigatorETL(BaseETL):
                 F.col("configuration").alias("network_configuration_json"),
             )
 
+        b_rules = self._safe_load(rules_bronze_path)
+        if b_rules is not None:
+            b_rules = b_rules.select(
+                F.col("tenant_id").alias("cfg_tenant_id"),
+                F.col("rule_id").alias("cfg_rule_id"),
+                F.col("rule_cfg").alias("cfg_rule_cfg"),
+                F.col("configuration").alias("rule_configuration_json"),
+                F.col("ingested_at_ts").alias("rule_metadata_ingested_at_ts"),
+            )
+
         # -- infer alert schema and parse ------------------------------------
         alert_schema = self.infer_json_schema(s_alerts, "alert_data")
         a = s_alerts.withColumn("alert_data_obj", F.from_json("alert_data", alert_schema))
@@ -434,7 +608,7 @@ class AlertNavigatorETL(BaseETL):
         # -- build views -------------------------------------------------------
         alerts_nav_header = self._build_header(a, g_tx)
         typ = self._build_typologies(a, b_typ)
-        rules = self._build_rules(a)
+        rules = self._build_rules(a, b_rules)
         network_eval = self._build_network_eval(alerts_nav_header, b_net)
 
         # -- write views -------------------------------------------------------

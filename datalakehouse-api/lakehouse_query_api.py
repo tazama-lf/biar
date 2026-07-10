@@ -145,7 +145,10 @@ account_holder          = f"{WAREHOUSE_ROOT}/gold/account_holder"
 evaluation              = f"{WAREHOUSE_ROOT}/gold/evaluation"
 entity_gold_path       = f"{WAREHOUSE_ROOT}/gold/entity"
 comments_gold_path     = f"{WAREHOUSE_ROOT}/gold/comments"
-typologies_bronze_path     = f"{WAREHOUSE_ROOT}/bronze/typologies"
+typologies_gold_path     = f"{WAREHOUSE_ROOT}/gold/typologies"
+rules_bronze_path         = f"{WAREHOUSE_ROOT}/bronze/rule"
+typologies_bronze_path         = f"{WAREHOUSE_ROOT}/bronze/typologies"
+alerts_bronze_path         = f"{WAREHOUSE_ROOT}/bronze/alerts"
 
 VIEWS_ROOT                            = f"{WAREHOUSE_ROOT}/views"
 ALERT_NAV_ROOT                        = f"{VIEWS_ROOT}/alert_navigator"
@@ -167,7 +170,7 @@ GOLD_PATHS = {
     "pacs008":                         pacs008_gold_path,
     "network_map":                     nmap_gold_path,
     "rule":                            rules_gold_path,
-    "typologies":                      typologies_bronze_path,
+    "typologies":                      typologies_gold_path,
     "conditions":                      conditions_gold_path,
     "account_holder":                  account_holder,
     "evaluation":                      evaluation,
@@ -182,6 +185,9 @@ GOLD_PATHS = {
     "tx_network_accounts_edges":       vw_tx_network_accounts_edges_path,
     "tx_network_counterparties_edges": vw_tx_network_counterparties_edges_path,
     "counterparty_account_links":      vw_counterparty_account_links_path,
+    "alerts_bronze":                   alerts_bronze_path,
+    "rules_bronze":                    rules_bronze_path,
+    "typologies_bronze":               typologies_bronze_path,
     
 }
 
