@@ -67,7 +67,7 @@ class ConditionsTimelineViewETL(BaseETL):
 
     def _load_conditions(self) -> DataFrame:
         """Load and select gold conditions fields."""
-        c0 = self.spark.read.format("hudi").load(f"{self.warehouse_root}/gold/conditions").alias("c")
+        c0 = self.spark.read.format("hudi").load(f"{self.warehouse_root}/gold/condition").alias("c")
 
         return c0.select(
             F.col("c.pk").alias("condition_pk"),

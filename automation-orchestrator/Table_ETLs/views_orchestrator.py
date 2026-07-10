@@ -74,9 +74,11 @@ class ViewsOrchestrator:
         else:
             print("[ViewsOrchestrator] Skipping transaction views (missing bronze/transactions)")
 
-        # ---- Network Navigator (requires bronze/transactions + gold alerts/cases/tasks) ----
+        # ---- Network Navigator (requires transactions + PACS enrichment + gold alerts/cases/tasks) ----
         if (
             self._hudi_ready(f"{self.warehouse_root}/bronze/transactions")
+            and self._hudi_ready(f"{self.warehouse_root}/gold/pacs008")
+            and self._hudi_ready(f"{self.warehouse_root}/gold/pacs002")
             and self._hudi_ready(f"{self.warehouse_root}/gold/alerts")
             and self._hudi_ready(f"{self.warehouse_root}/gold/cases")
             and self._hudi_ready(f"{self.warehouse_root}/gold/tasks")
@@ -85,7 +87,7 @@ class ViewsOrchestrator:
         else:
             print(
                 "[ViewsOrchestrator] Skipping network navigator views "
-                "(missing transactions/alerts/cases/tasks)"
+                "(missing transactions/pacs008/pacs002/alerts/cases/tasks)"
             )
 
         # ---- Alert History (requires gold alerts/cases/tasks + vw_transaction_detail) ----

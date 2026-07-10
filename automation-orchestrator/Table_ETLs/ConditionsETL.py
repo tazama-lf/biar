@@ -12,15 +12,15 @@ class ConditionsETL(BaseETL):
 
     @property
     def bronze_path(self) -> str:
-        return f"{self.warehouse_root}/bronze/conditions"
+        return f"{self.warehouse_root}/bronze/condition"
 
     @property
     def silver_path(self) -> str:
-        return f"{self.warehouse_root}/silver/conditions"
+        return f"{self.warehouse_root}/silver/condition"
 
     @property
     def gold_path(self) -> str:
-        return f"{self.warehouse_root}/gold/conditions"
+        return f"{self.warehouse_root}/gold/condition"
 
     # ------------------------------------------------------------------
     # BRONZE
