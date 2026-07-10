@@ -92,6 +92,7 @@ class AlertNavigatorETL(BaseETL):
                 F.col("case_id").cast("long").alias("case_id"),
                 F.col("tx_msg_id").cast("string").alias("tx_msg_id"),
                 F.col("tx_type").cast("string").alias("tx_type"),
+                F.trim(F.col("tx_original_e2e_id").cast("string")).alias("_payment_bridge_e2e"),
                 F.col("event_ts").cast("timestamp").alias("alert_timestamp"),
                 F.to_date("event_ts").alias("alert_date"),
                 F.col("message").cast("string").alias("alert_reason"),
@@ -107,44 +108,51 @@ class AlertNavigatorETL(BaseETL):
         )
 
         if g_tx is not None:
-            # pacs002: alert-triggering message (no amount), keep its identifiers
-            pacs002 = g_tx.alias("pacs002").filter(
-                F.col("tx_amount").isNull()
-            ).select(
+            # Alert-triggering transaction row. Status now comes from Ozone txsts.
+            tx_by_msg = g_tx.select(
                 F.trim(F.col("tx_msg_id").cast("string")).alias("tx_msg_id"),
-                F.trim(F.col("end_to_end_id").cast("string")).alias("end_to_end_id"),
-                F.trim(F.col("transaction_id").cast("string")).alias("transaction_id"),
-            )
-
-            # pacs008: settlement message with amount
-            pacs008 = g_tx.alias("pacs008").filter(
-                F.col("tx_amount").isNotNull()
-            ).select(
-                F.trim(F.col("end_to_end_id").cast("string")).alias("end_to_end_id"),
-                F.col("tx_status").cast("string").alias("tx_status"),
-                F.col("tx_amount").cast("decimal(18,2)").alias("tx_amount"),
-                F.col("tx_ccy").cast("string").alias("tx_ccy"),
-            )
-
-            # Bridge: pacs002 → pacs008 via end_to_end_id
-            g_tx_lookup = pacs002.join(
-                pacs008,
-                on="end_to_end_id",
-                how="inner",
-            ).select(
-                "tx_msg_id",
-                "end_to_end_id",
-                "transaction_id",
-                "tx_status",
-                "tx_amount",
-                "tx_ccy",
+                F.trim(F.col("end_to_end_id").cast("string")).alias("msg_end_to_end_id"),
+                F.trim(F.col("transaction_id").cast("string")).alias("msg_transaction_id"),
+                F.col("tx_status").cast("string").alias("msg_tx_status"),
+                F.col("tx_amount").cast("decimal(18,2)").alias("msg_tx_amount"),
+                F.col("tx_ccy").cast("string").alias("msg_tx_ccy"),
             ).dropDuplicates(["tx_msg_id"])
 
+            # Payment row for amount/currency enrichment by original/end-to-end id.
+            tx_by_e2e = g_tx.filter(
+                (F.col("tx_type").isin("pacs.008.001.10", "pain.001.001.11"))
+                | F.col("tx_amount").isNotNull()
+            ).select(
+                F.trim(F.col("end_to_end_id").cast("string")).alias("lookup_end_to_end_id"),
+                F.trim(F.col("transaction_id").cast("string")).alias("e2e_transaction_id"),
+                F.col("tx_amount").cast("decimal(18,2)").alias("e2e_tx_amount"),
+                F.col("tx_ccy").cast("string").alias("e2e_tx_ccy"),
+            ).dropDuplicates(["lookup_end_to_end_id"])
+
             header = (
-                header.join(g_tx_lookup, on="tx_msg_id", how="left")
-                .withColumnRenamed("tx_status", "transaction_status")
-                .withColumnRenamed("tx_amount", "transaction_amount")
-                .withColumnRenamed("tx_ccy", "transaction_currency")
+                header.join(tx_by_msg, on="tx_msg_id", how="left")
+                .withColumn(
+                    "_payment_bridge_e2e",
+                    F.coalesce(F.col("_payment_bridge_e2e"), F.col("msg_end_to_end_id")),
+                )
+                .join(
+                    tx_by_e2e,
+                    F.col("_payment_bridge_e2e") == F.col("lookup_end_to_end_id"),
+                    "left",
+                )
+                .withColumn("transaction_status", F.col("msg_tx_status"))
+                .withColumn(
+                    "transaction_id",
+                    F.coalesce(F.col("msg_transaction_id"), F.col("e2e_transaction_id")),
+                )
+                .withColumn(
+                    "transaction_amount",
+                    F.coalesce(F.col("msg_tx_amount"), F.col("e2e_tx_amount")),
+                )
+                .withColumn(
+                    "transaction_currency",
+                    F.coalesce(F.col("msg_tx_ccy"), F.col("e2e_tx_ccy")),
+                )
                 .withColumn(
                     "block_or_override_status",
                     F.when(
@@ -157,9 +165,21 @@ class AlertNavigatorETL(BaseETL):
                     )
                     .otherwise(F.lit(None)),
                 )
+                .drop(
+                    "_payment_bridge_e2e",
+                    "msg_end_to_end_id",
+                    "msg_transaction_id",
+                    "msg_tx_status",
+                    "msg_tx_amount",
+                    "msg_tx_ccy",
+                    "lookup_end_to_end_id",
+                    "e2e_transaction_id",
+                    "e2e_tx_amount",
+                    "e2e_tx_ccy",
+                )
             )
 
-        return header
+        return header.drop("_payment_bridge_e2e")
           
     def _build_typologies(self, a: DataFrame, b_typ: DataFrame | None) -> DataFrame:
         """Build the alerts_nav_typologies view."""
@@ -545,12 +565,13 @@ class AlertNavigatorETL(BaseETL):
         g_tx = self._safe_load(
             transactions_gold_path,
             select_expr=[
-                "tx_msg_id",
-                "tx_status",
-                "tx_amount",
-                "tx_ccy",
-                "transaction_id",
-                "end_to_end_id",
+                F.col("msgid").cast("string").alias("tx_msg_id"),
+                F.col("txsts").cast("string").alias("tx_status"),
+                F.col("amt").cast("double").alias("tx_amount"),
+                F.col("ccy").cast("string").alias("tx_ccy"),
+                F.col("txtp").cast("string").alias("tx_type"),
+                F.col("transaction_id").cast("string").alias("transaction_id"),
+                F.col("endtoendid").cast("string").alias("end_to_end_id"),
             ],
         )
 
