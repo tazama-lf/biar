@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN_LIB }}
 
       - name: Build
         run: npm run build
@@ -52,7 +52,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN_LIB }}
 
       - name: Lint
         run: npm run lint
@@ -76,7 +76,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN_LIB }}
 
       - name: Run tests
         run: npm test
@@ -139,7 +139,7 @@ jobs:
           file: ./unstructured-pipeline/Dockerfile
           push: false
           secrets: |
-            GH_TOKEN=${{ secrets.GH_TOKEN }}
+            GH_TOKEN=${{ secrets.GH_TOKEN_LIB }}
 
       - name: Build nifi
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294

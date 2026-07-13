@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import PurePosixPath
 from typing import Optional
 
 from pyspark.sql import SparkSession
@@ -9,16 +10,24 @@ from Table_ETLs.AccountETL import AccountETL
 from Table_ETLs.Account_HolderETL import AccountHolderETL
 from Table_ETLs.ALertsETL import AlertsETL
 from Table_ETLs.CasesETL import CasesETL
-from Table_ETLs.CombinedPacs import CombinedPacsETL
 from Table_ETLs.ConditionsETL import ConditionsETL
 from Table_ETLs.Netwrok_MapETL import NetworkMapETL
+from Table_ETLs.Pacs002ETL import Pacs002ETL
+from Table_ETLs.Pacs008ETL import Pacs008ETL
 from Table_ETLs.RulesETL import RulesETL
 from Table_ETLs.TasksETL import TasksETL
 from Table_ETLs.TypologiesETL import TypologiesETL
+from Table_ETLs.TransactionsETL import TransactionsETL
 from Table_ETLs.CommentsETL import CommentsETL
 from Table_ETLs.EntityETL import EntityETL
 from Table_ETLs.EvaluationETL import EvaluationETL
+from Table_ETLs.cms_usernames import CmsUsernamesETL
 from Table_ETLs.DynamicETL import DynamicETL
+from Table_ETLs.CasePriorityThresholdsETL import CasePriorityThresholdsETL
+from Table_ETLs.SlaEscalationRecordsETL import SlaEscalationRecordsETL
+from Table_ETLs.SlaEscalationThresholdsETL import SlaEscalationThresholdsETL
+from Table_ETLs.SlaPoliciesETL import SlaPoliciesETL
+from Table_ETLs.InvestigationGroupsETL import InvestigationGroupsETL
 
 # Views orchestrator
 from Table_ETLs.views_orchestrator import ViewsOrchestrator
@@ -54,17 +63,33 @@ class FullETLOrchestrator:
         "alerts": AlertsETL,
         "cases": CasesETL,
         "conditions": ConditionsETL,
+        "condition": ConditionsETL,
         "network_map": NetworkMapETL,
+        "pacs002": Pacs002ETL,
+        "pacs008": Pacs008ETL,
         "rule": RulesETL,
         "rules": RulesETL,
         "tasks": TasksETL,
         "typology": TypologiesETL,
         "typologies": TypologiesETL,
+        "transaction": TransactionsETL,
+        "transactions": TransactionsETL,
         "comment": CommentsETL,
         "comments": CommentsETL,
         "entity": EntityETL,
         "entities": EntityETL,
         "evaluation": EvaluationETL,
+        "cms_usernames": CmsUsernamesETL,
+        "case_priority_thresholds": CasePriorityThresholdsETL,
+        "case_priority_threshold": CasePriorityThresholdsETL,
+        "sla_escalation_records": SlaEscalationRecordsETL,
+        "sla_escalation_record": SlaEscalationRecordsETL,
+        "sla_escalation_thresholds": SlaEscalationThresholdsETL,
+        "sla_escalation_threshold": SlaEscalationThresholdsETL,
+        "sla_policies": SlaPoliciesETL,
+        "sla_policy": SlaPoliciesETL,
+        "investigation_groups": InvestigationGroupsETL,
+        "investigation_group": InvestigationGroupsETL,
     }
 
     def __init__(
@@ -98,7 +123,7 @@ class FullETLOrchestrator:
             to build any views whose upstream dependencies are now available.
         """
         raw_path, table, bucket, object_key, source_path = self._resolve_params(
-            raw_path, table, bucket, object_key
+            raw_path, db_name, table, bucket, object_key
         )
 
         print("* Starting Full Tazama Hudi ETL Pipeline...")
@@ -136,29 +161,82 @@ class FullETLOrchestrator:
     def _resolve_params(
         self,
         raw_path: Optional[str],
+        db_name: Optional[str],
         table: Optional[str],
         bucket: Optional[str],
         object_key: Optional[str],
     ) -> tuple[str, str, str, str, str]:
         """Resolve and default all input parameters."""
-        if not all([raw_path, table, bucket, object_key]):
-            raw_path = raw_path or f"s3a://{bucket}/{table}/{object_key}"
+        table = self._resolve_table_name(table=table, raw_path=raw_path, object_key=object_key)
+
+        if not raw_path:
+            object_key_clean = (object_key or "").strip().lstrip("/")
+            if "/" in object_key_clean:
+                raw_path = f"s3a://{bucket}/{object_key_clean}"
+            else:
+                key_parts = []
+                if db_name:
+                    key_parts.append(db_name.strip().strip("/"))
+                if table:
+                    key_parts.append(table)
+                if object_key_clean:
+                    key_parts.append(object_key_clean)
+                raw_path = f"s3a://{bucket}/{'/'.join(key_parts)}"
 
         source_path = raw_path
         return raw_path, table, bucket, object_key, source_path
 
+    @classmethod
+    def _normalize_table_name(cls, table: Optional[str]) -> str:
+        """Normalize incoming table names from NiFi/API payloads."""
+        normalized = (table or "").strip().lower().replace("-", "_")
+        normalized = normalized.strip("/")
+        if "/" in normalized:
+            normalized = normalized.split("/")[-1]
+        return normalized
+
+    @classmethod
+    def _resolve_table_name(
+        cls,
+        table: Optional[str],
+        raw_path: Optional[str],
+        object_key: Optional[str],
+    ) -> str:
+        """Resolve a table name from explicit table first, then object/raw paths."""
+        table_name = cls._normalize_table_name(table)
+        path_table = cls._resolve_table_name_from_paths(raw_path=raw_path, object_key=object_key)
+
+        if table_name:
+            return table_name
+
+        return path_table
+
+    @classmethod
+    def _resolve_table_name_from_paths(
+        cls,
+        raw_path: Optional[str],
+        object_key: Optional[str],
+    ) -> str:
+        """Resolve a registered table name from object/raw path parts."""
+
+        for candidate in (object_key, raw_path):
+            if not candidate:
+                continue
+            parts = [
+                p.lower().replace("-", "_")
+                for p in PurePosixPath(str(candidate).replace("s3a://", "")).parts
+                if p and p not in {"/", "."}
+            ]
+            for part in reversed(parts):
+                normalized = cls._normalize_table_name(part)
+                if normalized in cls._ETL_REGISTRY:
+                    return normalized
+
+        return ""
+
     def _route_etl(self, table: str, source_path: str, db_name: Optional[str] = None) -> str:
         """Dispatch to the correct ETL class based on table name."""
-        if table in ("pacs008", "pacs002"):
-            CombinedPacsETL(self.spark, self.warehouse_root, table=table).run(source_path)
-            return "All Done"
-
-        if table in ("transaction", "transactions"):
-            print(
-                "Skipping standalone Transactions ETL: it is triggered only after "
-                "pacs008 + pacs002 reach GOLD (via CombinedPacsETL)."
-            )
-            return "Skipped: transactions are derived from PACS gold"
+        table = self._normalize_table_name(table)
 
         if table in self._ETL_REGISTRY:
             self._ETL_REGISTRY[table](self.spark, self.warehouse_root).run(source_path)

@@ -11,45 +11,6 @@ from pyspark.sql.window import Window
 
 from .BaseETL import BaseETL
 
-# Required pacs008-style columns that may be absent in the Tasks silver table.
-_PACS008_COLS = {
-    "tx_tenant_id": "string",
-    "dc_cdtr_id": "string",
-    "dc_dbtr_id": "string",
-    "dc_cre_dt_tm": "timestamp",
-    "dc_instd_amt": "double",
-    "dc_instd_ccy": "string",
-    "dc_xchg_rate": "string",
-    "dc_cdtr_acct_id": "string",
-    "dc_dbtr_acct_id": "string",
-    "dc_intrbk_amt": "double",
-    "dc_intrbk_ccy": "string",
-    "grp_msg_id": "string",
-    "grp_cre_dt_tm": "timestamp",
-    "grp_nb_of_txs": "int",
-    "sttlm_mtd": "string",
-    "rmt_ustrd": "string",
-    "purp_cd": "string",
-    "pmt_instr_id": "string",
-    "pmt_e2e_id": "string",
-    "chrg_br": "string",
-    "cdtr_agt_mmb_id": "string",
-    "dbtr_agt_mmb_id": "string",
-    "cdtr_name": "string",
-    "dbtr_name": "string",
-    "cdtr_id": "string",
-    "dbtr_id": "string",
-    "cdtr_acct_scheme": "string",
-    "dbtr_acct_scheme": "string",
-    "intrbk_amt": "double",
-    "intrbk_ccy": "string",
-    "xchg_rate": "string",
-    "charge_amt": "double",
-    "charge_ccy": "string",
-    "charge_agent_mmb_id": "string",
-    "event_ts": "timestamp",
-}
-
 
 class TasksETL(BaseETL):
     """Full Bronze → Silver → Gold pipeline for raw task JSON payloads."""
@@ -76,13 +37,19 @@ class TasksETL(BaseETL):
 
     def bronze(self, source_path: str) -> str:
         df = self.spark.read.json(source_path)
+        df = self.ensure_columns(
+            df,
+            {
+                "investigationNotes": "string",
+            },
+        )
         print("[TasksETL] Raw tasks read.")
 
         bronze = (
             df
             .withColumn("task_id",            F.col("task_id").cast("long"))
             .withColumn("case_id",            F.col("case_id").cast("long"))
-            .withColumn("tenant_id",            F.col("tenant_id").cast("long"))
+            .withColumn("tenant_id",          F.col("tenant_id").cast("string"))
             .withColumn("created_at",         F.col("created_at").cast("string"))
             .withColumn("updated_at",         F.col("updated_at").cast("string"))
             .withColumn("completed_at",       F.col("completed_at").cast("string"))
@@ -91,6 +58,7 @@ class TasksETL(BaseETL):
             .withColumn("assigned_user_id",   F.col("assigned_user_id").cast("string"))
             .withColumn("candidateGroup",     F.col("candidateGroup").cast("string"))
             .withColumn("description",        F.col("description").cast("string"))
+            .withColumn("investigationNotes", F.col("investigationNotes").cast("string"))
             .withColumn("name",               F.col("name").cast("string"))
             .withColumn("status",             F.col("status").cast("string"))
             .withColumn("task_type",          F.col("task_type").cast("string"))
@@ -121,11 +89,25 @@ class TasksETL(BaseETL):
 
     def silver(self) -> str:
         b = self.spark.read.format("hudi").load(self.bronze_path)
+        b = self.ensure_columns(
+            b,
+            {
+                "investigationNotes": "string",
+            },
+        )
 
         silver = (
             b
             .withColumn("task_id",             F.col("task_id").cast("long"))
             .withColumn("case_id",             F.col("case_id").cast("long"))
+            .withColumn("tenant_id",           F.col("tenant_id").cast("string"))
+            .withColumn("assigned_user_id",    F.col("assigned_user_id").cast("string"))
+            .withColumn("candidateGroup",      F.col("candidateGroup").cast("string"))
+            .withColumn("description",         F.col("description").cast("string"))
+            .withColumn("investigationNotes",  F.col("investigationNotes").cast("string"))
+            .withColumn("name",                F.col("name").cast("string"))
+            .withColumn("status",              F.col("status").cast("string"))
+            .withColumn("task_type",           F.col("task_type").cast("string"))
             .withColumn("created_at_ms",       F.col("created_at").cast("long"))
             .withColumn("updated_at_ms",       F.col("updated_at").cast("long"))
             .withColumn("completed_at_ms",     F.col("completed_at").cast("long"))
@@ -173,6 +155,22 @@ class TasksETL(BaseETL):
         # Dedup
         w = Window.partitionBy("task_id").orderBy(F.col("created_at_ts").desc())
         silver = silver.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
+
+        silver = silver.select(
+            "_hoodie_commit_time", "_hoodie_commit_seqno", "_hoodie_record_key",
+            "_hoodie_partition_path", "_hoodie_file_name",
+            "assigned_user_id", "candidateGroup", "candidate_group_norm",
+            "case_id", "completed_at", "completed_at_ms",
+            "created_at", "created_at_ms", "description", "investigationNotes",
+            "name", "sla_deadline", "sla_deadline_ms", "sla_duration_hours",
+            "status", "status_norm", "task_id", "task_type", "task_type_norm",
+            "tenant_id", "updated_at", "updated_at_ms",
+            "task_created_ts", "task_updated_ts", "task_completed_ts", "sla_deadline_ts",
+            "task_created_date", "task_updated_date", "task_completed_date",
+            "is_assigned", "is_completed", "sla_breached",
+            "task_age_ms_at_ingest", "task_duration_ms", "sla_remaining_ms",
+            "created_at_ts", "source_file_path", "record_hash", "_row_payload_json",
+        )
 
         # DQ split
         #silver_pass, silver_fail = self._apply_dq(silver)
@@ -225,36 +223,75 @@ class TasksETL(BaseETL):
 
     def gold(self) -> str:
         s = self.spark.read.format("hudi").load(self.silver_path)
-        s = self.ensure_columns(s, _PACS008_COLS)
-        s = s.withColumn("tx_tenant_id", F.coalesce(F.col("tx_tenant_id"), F.col("tenant_id").cast("string")))
-
-        if "event_ts" in s.columns and "creation_dt_tm" in s.columns:
-            s = s.withColumn("event_ts", F.coalesce(F.col("event_ts"), F.col("creation_dt_tm")))
+        s = self.ensure_columns(
+            s,
+            {
+                "investigationNotes": "string",
+                "completed_at_ms": "long",
+                "created_at_ms": "long",
+                "updated_at_ms": "long",
+                "sla_deadline_ms": "long",
+                "candidate_group_norm": "string",
+                "status_norm": "string",
+                "task_type_norm": "string",
+                "task_created_ts": "timestamp",
+                "task_updated_ts": "timestamp",
+                "task_completed_ts": "timestamp",
+                "sla_deadline_ts": "timestamp",
+                "task_created_date": "date",
+                "task_updated_date": "date",
+                "task_completed_date": "date",
+                "is_assigned": "int",
+                "is_completed": "int",
+                "sla_breached": "int",
+                "task_age_ms_at_ingest": "long",
+                "task_duration_ms": "long",
+                "sla_remaining_ms": "long",
+            },
+        )
 
         w = Window.partitionBy("task_id").orderBy(F.col("created_at_ts").desc())
         s = s.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
 
         gold = s.select(
+            F.col("assigned_user_id").cast("string").alias("assigned_user_id"),
+            F.col("candidateGroup").cast("string").alias("candidateGroup"),
             F.col("task_id").cast("long").alias("task_id"),
             F.col("case_id").cast("long").alias("case_id"),
+            F.col("tenant_id").cast("string").alias("tenant_id"),
+            F.col("completed_at").cast("string").alias("completed_at"),
+            F.col("created_at").cast("string").alias("created_at"),
+            F.col("updated_at").cast("string").alias("updated_at"),
+            F.col("description").cast("string").alias("description"),
+            F.col("investigationNotes").cast("string").alias("investigationNotes"),
+            F.col("name").cast("string").alias("name"),
+            F.col("sla_deadline").cast("string").alias("sla_deadline"),
+            F.col("sla_duration_hours").cast("double").alias("sla_duration_hours"),
+            F.col("status_norm").cast("string").alias("status"),
+            F.col("status").cast("string").alias("status_raw"),
             F.col("task_type").cast("string").alias("task_type"),
             F.col("candidate_group_norm").cast("string").alias("candidate_group"),
-            F.col("assigned_user_id").cast("string").alias("assigned_user_id"),
             F.col("name").cast("string").alias("task_name"),
-            F.col("status_norm").cast("string").alias("status"),
+            F.col("status_norm").cast("string").alias("status_norm"),
+            F.col("task_type_norm").cast("string").alias("task_type_norm"),
+            F.col("created_at_ms").cast("long").alias("created_at_ms"),
+            F.col("updated_at_ms").cast("long").alias("updated_at_ms"),
+            F.col("completed_at_ms").cast("long").alias("completed_at_ms"),
+            F.col("sla_deadline_ms").cast("long").alias("sla_deadline_ms"),
             F.col("task_created_ts").cast("timestamp").alias("task_created_ts"),
             F.col("task_updated_ts").cast("timestamp").alias("task_updated_ts"),
             F.col("task_completed_ts").cast("timestamp").alias("task_completed_ts"),
             F.col("sla_deadline_ts").cast("timestamp").alias("sla_deadline_ts"),
             F.col("task_created_date").cast("date").alias("task_created_date"),
-            F.col("created_at_ts").cast("timestamp").alias("ingested_at_ts"),
-            F.col("sla_duration_hours").cast("double").alias("sla_duration_hours"),
+            F.col("task_updated_date").cast("date").alias("task_updated_date"),
+            F.col("task_completed_date").cast("date").alias("task_completed_date"),
             F.col("is_assigned").cast("int").alias("is_assigned"),
             F.col("is_completed").cast("int").alias("is_completed"),
             F.col("sla_breached").cast("int").alias("sla_breached"),
             F.col("task_age_ms_at_ingest").cast("long").alias("task_age_ms_at_ingest"),
             F.col("task_duration_ms").cast("long").alias("task_duration_ms"),
             F.col("sla_remaining_ms").cast("long").alias("sla_remaining_ms"),
+            F.col("created_at_ts").cast("timestamp").alias("ingested_at_ts"),
             F.col("source_file_path").cast("string").alias("source_file_path"),
             F.col("record_hash").cast("string").alias("record_hash"),
         )
