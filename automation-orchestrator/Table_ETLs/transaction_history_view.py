@@ -11,7 +11,7 @@ class TransactionHistoryViewETL(BaseETL):
     """
     Transaction History View builder.
 
-    Reads bronze/transactions, extracts PACS JSON, joins optional
+    Reads bronze/transactions, joins PACS gold enrichment, joins optional
     alerts/cases/tasks, expands to entity level, and writes event +
     day/week/month/year aggregate rows to Hudi.
 
@@ -23,6 +23,8 @@ class TransactionHistoryViewETL(BaseETL):
         self.views_root = f"{self.warehouse_root}/views"
         self.view_path = f"{self.views_root}/vw_transaction_history"
         self.transactions_bronze_path = f"{self.warehouse_root}/bronze/transactions"
+        self.pacs008_gold_path = f"{self.warehouse_root}/gold/pacs008"
+        self.pacs002_gold_path = f"{self.warehouse_root}/gold/pacs002"
 
     @property
     def bronze_path(self) -> str:
@@ -49,6 +51,116 @@ class TransactionHistoryViewETL(BaseETL):
             return df
         except Exception:
             return None
+
+    @staticmethod
+    def _event_ts(col_name: str):
+        """Parse the ISO timestamp emitted by Ozone event history."""
+        return F.to_timestamp(F.regexp_replace(F.col(col_name).cast("string"), "Z$", ""))
+
+    @staticmethod
+    def _first_available(df: DataFrame, *names: str):
+        """Return the first available column from the transaction table."""
+        cols = [F.col(name) for name in names if name in df.columns]
+        if cols:
+            return F.coalesce(*cols)
+        return F.lit(None)
+
+    def _extract_base_from_tables(self, tx: DataFrame) -> DataFrame:
+        """Build the base transaction frame from transactions plus PACS gold joins."""
+        base_tx = (
+            tx
+            .withColumn("view_endtoendid", self._first_available(tx, "endtoendid", "raw_history_endtoendid", "endToEndId").cast("string"))
+            .withColumn("view_tenantid", self._first_available(tx, "tenantid", "raw_history_tenantid", "tenantId").cast("string"))
+            .withColumn("view_txtp", self._first_available(tx, "txtp", "raw_history_txtp", "tx_type").cast("string"))
+            .withColumn("view_msgid", self._first_available(tx, "msgid", "raw_history_msgid", "tx_msg_id").cast("string"))
+            .withColumn("view_credttm", self._first_available(tx, "credttm", "raw_history_credttm").cast("string"))
+            .withColumn("view_amt", self._first_available(tx, "amt", "raw_history_amt").cast("double"))
+            .withColumn("view_ccy", self._first_available(tx, "ccy", "raw_history_ccy").cast("string"))
+            .withColumn("end_to_end_id", F.col("view_endtoendid"))
+            .withColumn("tenant_id", F.col("view_tenantid"))
+            .withColumn("tx_type", F.col("view_txtp"))
+            .withColumn("tx_msg_id", F.col("view_msgid"))
+            .withColumn("event_ts", F.coalesce(self._first_available(tx, "event_ts").cast("timestamp"), self._event_ts("view_credttm")))
+            .withColumn("event_date", F.to_date("event_ts"))
+            .withColumn("event_amount", F.col("view_amt"))
+            .withColumn("event_ccy", F.col("view_ccy"))
+        )
+
+        p8 = self._safe_load(
+            self.pacs008_gold_path,
+            select_expr=[
+                F.col("end_to_end_id").cast("string").alias("p8_end_to_end_id"),
+                F.col("dbtr_name").cast("string").alias("p8_dbtr_name"),
+                F.col("dbtr_id").cast("string").alias("p8_dbtr_id"),
+                F.col("cdtr_name").cast("string").alias("p8_cdtr_name"),
+                F.col("cdtr_id").cast("string").alias("p8_cdtr_id"),
+                F.coalesce(F.col("dbtr_acct_id"), F.col("dc_dbtr_acct_id"), F.col("debtor_account_id")).cast("string").alias("p8_dbtr_account_id"),
+                F.coalesce(F.col("cdtr_acct_id"), F.col("dc_cdtr_acct_id"), F.col("creditor_account_id")).cast("string").alias("p8_cdtr_account_id"),
+                F.coalesce(F.col("instd_amt"), F.col("dc_instd_amt")).cast("double").alias("p8_tx_amount"),
+                F.coalesce(F.col("instd_ccy"), F.col("dc_instd_ccy")).cast("string").alias("p8_tx_ccy"),
+            ],
+        )
+
+        joined = base_tx
+        if p8 is not None:
+            p8 = p8.dropDuplicates(["p8_end_to_end_id"])
+            joined = joined.join(p8, joined.end_to_end_id == p8.p8_end_to_end_id, "left")
+
+        joined = self.ensure_columns(
+            joined,
+            {
+                "p8_dbtr_name": "string",
+                "p8_dbtr_id": "string",
+                "p8_cdtr_name": "string",
+                "p8_cdtr_id": "string",
+                "p8_dbtr_account_id": "string",
+                "p8_cdtr_account_id": "string",
+                "p8_tx_amount": "double",
+                "p8_tx_ccy": "string",
+            },
+        )
+
+        has_source = "source_file_path" in joined.columns
+        has_hash = "record_hash" in joined.columns
+        is_payment_tx = F.col("tx_type").isin(["pacs.008.001.10", "pain.001.001.11"])
+
+        return (
+            joined
+            .select(
+                F.col("transaction_id").cast("string").alias("transaction_id"),
+                F.col("end_to_end_id").cast("string").alias("end_to_end_id"),
+                F.col("tenant_id").cast("string").alias("tenant_id"),
+                F.col("tx_type").cast("string").alias("tx_type"),
+                F.col("tx_msg_id").cast("string").alias("tx_msg_id"),
+                F.col("event_ts").cast("timestamp").alias("event_ts"),
+                F.col("event_date").cast("date").alias("event_date"),
+                F.when(is_payment_tx, F.coalesce(F.col("event_amount"), F.col("p8_tx_amount")))
+                .otherwise(F.col("event_amount"))
+                .cast("double")
+                .alias("tx_amount"),
+                F.when(is_payment_tx, F.coalesce(F.col("event_ccy"), F.col("p8_tx_ccy")))
+                .otherwise(F.col("event_ccy"))
+                .cast("string")
+                .alias("tx_ccy"),
+                F.col("p8_dbtr_name").cast("string").alias("dbtr_name"),
+                F.col("p8_dbtr_id").cast("string").alias("dbtr_id"),
+                F.col("p8_cdtr_name").cast("string").alias("cdtr_name"),
+                F.col("p8_cdtr_id").cast("string").alias("cdtr_id"),
+                F.col("p8_dbtr_account_id").cast("string").alias("dbtr_account_id"),
+                F.col("p8_cdtr_account_id").cast("string").alias("cdtr_account_id"),
+                (
+                    F.col("source_file_path").cast("string")
+                    if has_source
+                    else F.lit(None).cast("string")
+                ).alias("source_file_path"),
+                (
+                    F.col("record_hash").cast("string")
+                    if has_hash
+                    else F.lit(None).cast("string")
+                ).alias("record_hash"),
+            )
+            .filter(F.col("event_ts").isNotNull())
+        )
 
     def _resolve_json_column(self, df: DataFrame) -> DataFrame:
         """Auto-detect and normalize the raw JSON payload column."""
@@ -509,21 +621,8 @@ class TransactionHistoryViewETL(BaseETL):
         # 1. Load bronze transactions
         tx = self.spark.read.format("hudi").load(self.transactions_bronze_path)
 
-        # 2. Normalize column names
-        rename_map = {
-            "endToEndId": "end_to_end_id",
-            "tenantId": "tenant_id",
-            "transaction_id": "transaction_id",
-        }
-        for src, dst in rename_map.items():
-            if src in tx.columns and dst not in tx.columns:
-                tx = tx.withColumnRenamed(src, dst)
-
-        # 3. Resolve JSON column
-        tx = self._resolve_json_column(tx)
-
-        # 4. Build base frame
-        base = self._extract_base(tx)
+        # 2. Build base frame from Ozone transactions plus PACS gold enrichment
+        base = self._extract_base_from_tables(tx)
 
         # 5. Join flags
         flags = self._join_flags(base)

@@ -23,6 +23,8 @@ class NetworkNavigatorViewETL(BaseETL):
         self.counterparties_edges_path = f"{self.views_root}/vw_tx_network_counterparties_edges"
         self.holder_links_path = f"{self.views_root}/vw_counterparty_account_links"
         self.transactions_bronze_path = f"{self.warehouse_root}/bronze/transactions"
+        self.pacs008_gold_path = f"{self.warehouse_root}/gold/pacs008"
+        self.pacs002_gold_path = f"{self.warehouse_root}/gold/pacs002"
 
     @property
     def bronze_path(self) -> str:
@@ -50,82 +52,120 @@ class NetworkNavigatorViewETL(BaseETL):
         except Exception:
             return None
 
+    @staticmethod
+    def _event_ts(col_name: str):
+        """Parse the ISO timestamp emitted by Ozone event history."""
+        return F.to_timestamp(F.regexp_replace(F.col(col_name).cast("string"), "Z$", ""))
+
+    @staticmethod
+    def _first_available(df: DataFrame, *names: str):
+        """Return the first available transaction column."""
+        cols = [F.col(name) for name in names if name in df.columns]
+        if cols:
+            return F.coalesce(*cols)
+        return F.lit(None)
+
     def _load_flags(self) -> DataFrame:
-        """Load bronze transactions + gold alerts/cases/tasks, return flagged base frame."""
+        """Load transactions + PACS enrichment + gold alerts/cases/tasks."""
         tx = self.spark.read.format("hudi").load(self.transactions_bronze_path)
 
-        # Normalize names
-        rename_map = {
-            "endToEndId": "end_to_end_id",
-            "tenantId": "tenant_id",
-            "transaction_id": "transaction_id",
-        }
-        for src, dst in rename_map.items():
-            if src in tx.columns and dst not in tx.columns:
-                tx = tx.withColumnRenamed(src, dst)
-
-        # Resolve JSON column
-        candidates = [
-            "transactionData",
-            "transaction_data",
-            "transaction",
-            "payload",
-            "raw_payload",
-        ]
-        json_col = next((c for c in candidates if c in tx.columns), None)
-        if json_col is None:
-            raise ValueError(
-                f"No raw JSON column found in bronze/transactions. "
-                f"Tried: {candidates}\nAvailable: {tx.columns}"
-            )
-        tx = tx.withColumn("transaction_data", F.col(json_col).cast("string"))
-
-        # Extract PACS fields
-        tx_type = F.get_json_object("transaction_data", "$.TxTp")
-        tx_msg_id = F.coalesce(
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.GrpHdr.MsgId"),
-            F.get_json_object("transaction_data", "$.FIToFIPmtSts.GrpHdr.MsgId"),
+        base_tx = (
+            tx
+            .withColumn("end_to_end_id", self._first_available(tx, "endtoendid", "raw_history_endtoendid", "endToEndId").cast("string"))
+            .withColumn("tenant_id", self._first_available(tx, "tenantid", "raw_history_tenantid", "tenantId").cast("string"))
+            .withColumn("tx_type", self._first_available(tx, "txtp", "raw_history_txtp", "tx_type").cast("string"))
+            .withColumn("tx_msg_id", self._first_available(tx, "msgid", "raw_history_msgid", "tx_msg_id").cast("string"))
+            .withColumn("event_credttm", self._first_available(tx, "credttm", "raw_history_credttm").cast("string"))
+            .withColumn("event_ts", F.coalesce(self._first_available(tx, "event_ts").cast("timestamp"), self._event_ts("event_credttm")))
+            .withColumn("event_date", F.to_date("event_ts"))
+            .withColumn("event_amount", self._first_available(tx, "amt", "raw_history_amt").cast("double"))
+            .withColumn("event_ccy", self._first_available(tx, "ccy", "raw_history_ccy").cast("string"))
+            .withColumn("event_source_account_id", self._first_available(tx, "source", "raw_history_source").cast("string"))
+            .withColumn("event_destination_account_id", self._first_available(tx, "destination", "raw_history_destination").cast("string"))
         )
-        event_ts = F.to_timestamp(
-            F.coalesce(
-                F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.GrpHdr.CreDtTm"),
-                F.get_json_object("transaction_data", "$.FIToFIPmtSts.GrpHdr.CreDtTm"),
-            )
+
+        p2 = self._safe_load(
+            self.pacs002_gold_path,
+            select_expr=[
+                F.col("message_id").cast("string").alias("p2_message_id"),
+                F.col("end_to_end_id").cast("string").alias("p2_end_to_end_id"),
+                F.col("orgnl_end_to_end_id").cast("string").alias("p2_orgnl_end_to_end_id"),
+                F.col("tx_status").cast("string").alias("p2_tx_status"),
+            ],
         )
-        event_date = F.to_date(event_ts)
 
-        dbtr_id = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Id.PrvtId.Othr[0].Id")
-        cdtr_id = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Id.PrvtId.Othr[0].Id")
-        dbtr_acct = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr[0].Id")
-        cdtr_acct = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr[0].Id")
-        tx_amount = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Amt").cast("double")
-        tx_ccy = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Ccy")
+        enriched = base_tx
+        if p2 is not None:
+            p2 = p2.dropDuplicates(["p2_message_id"])
+            enriched = enriched.join(p2, enriched.tx_msg_id == p2.p2_message_id, "left")
 
+        enriched = self.ensure_columns(
+            enriched,
+            {
+                "p2_end_to_end_id": "string",
+                "p2_orgnl_end_to_end_id": "string",
+                "p2_tx_status": "string",
+            },
+        ).withColumn(
+            "payment_end_to_end_id",
+            F.coalesce(F.col("end_to_end_id"), F.col("p2_orgnl_end_to_end_id"), F.col("p2_end_to_end_id")),
+        )
+
+        p8 = self._safe_load(
+            self.pacs008_gold_path,
+            select_expr=[
+                F.col("end_to_end_id").cast("string").alias("p8_end_to_end_id"),
+                F.col("dbtr_id").cast("string").alias("p8_dbtr_id"),
+                F.col("cdtr_id").cast("string").alias("p8_cdtr_id"),
+                F.coalesce(F.col("dbtr_acct_id"), F.col("dc_dbtr_acct_id"), F.col("debtor_account_id")).cast("string").alias("p8_dbtr_account_id"),
+                F.coalesce(F.col("cdtr_acct_id"), F.col("dc_cdtr_acct_id"), F.col("creditor_account_id")).cast("string").alias("p8_cdtr_account_id"),
+                F.coalesce(F.col("instd_amt"), F.col("dc_instd_amt")).cast("double").alias("p8_tx_amount"),
+                F.coalesce(F.col("instd_ccy"), F.col("dc_instd_ccy")).cast("string").alias("p8_tx_ccy"),
+            ],
+        )
+        if p8 is not None:
+            p8 = p8.dropDuplicates(["p8_end_to_end_id"])
+            enriched = enriched.join(p8, enriched.payment_end_to_end_id == p8.p8_end_to_end_id, "left")
+
+        enriched = self.ensure_columns(
+            enriched,
+            {
+                "p8_dbtr_id": "string",
+                "p8_cdtr_id": "string",
+                "p8_dbtr_account_id": "string",
+                "p8_cdtr_account_id": "string",
+                "p8_tx_amount": "double",
+                "p8_tx_ccy": "string",
+            },
+        )
+
+        is_payment_tx = F.col("tx_type").isin(["pacs.008.001.10", "pain.001.001.11"])
         base = (
-            tx.withColumn("tx_type", tx_type)
-            .withColumn("tx_msg_id", tx_msg_id)
-            .withColumn("event_ts", event_ts)
-            .withColumn("event_date", event_date)
-            .withColumn("tx_amount", tx_amount)
-            .withColumn("tx_ccy", tx_ccy)
-            .withColumn("dbtr_id", dbtr_id)
-            .withColumn("cdtr_id", cdtr_id)
-            .withColumn("dbtr_account_id", dbtr_acct)
-            .withColumn("cdtr_account_id", cdtr_acct)
+            enriched
             .select(
-                F.col("transaction_id").cast("long").alias("transaction_id"),
+                F.col("transaction_id").cast("string").alias("transaction_id"),
                 F.col("end_to_end_id").cast("string").alias("end_to_end_id"),
                 F.col("tenant_id").cast("string").alias("tenant_id"),
                 F.col("tx_type").cast("string").alias("tx_type"),
                 F.col("tx_msg_id").cast("string").alias("tx_msg_id"),
                 F.col("event_ts").cast("timestamp").alias("event_ts"),
                 F.col("event_date").cast("date").alias("event_date"),
-                F.col("tx_amount").cast("double").alias("tx_amount"),
-                F.col("tx_ccy").cast("string").alias("tx_ccy"),
-                F.col("dbtr_id").cast("string").alias("dbtr_id"),
-                F.col("cdtr_id").cast("string").alias("cdtr_id"),
-                F.col("dbtr_account_id").cast("string").alias("dbtr_account_id"),
-                F.col("cdtr_account_id").cast("string").alias("cdtr_account_id"),
+                F.when(is_payment_tx, F.coalesce(F.col("event_amount"), F.col("p8_tx_amount")))
+                .otherwise(F.lit(None).cast("double"))
+                .cast("double")
+                .alias("tx_amount"),
+                F.when(is_payment_tx, F.coalesce(F.col("event_ccy"), F.col("p8_tx_ccy")))
+                .otherwise(F.lit(None).cast("string"))
+                .cast("string")
+                .alias("tx_ccy"),
+                F.when(is_payment_tx, F.col("p8_dbtr_id")).otherwise(F.lit(None).cast("string")).alias("dbtr_id"),
+                F.when(is_payment_tx, F.col("p8_cdtr_id")).otherwise(F.lit(None).cast("string")).alias("cdtr_id"),
+                F.when(is_payment_tx, F.coalesce(F.col("p8_dbtr_account_id"), F.col("event_source_account_id")))
+                .otherwise(F.lit(None).cast("string"))
+                .alias("dbtr_account_id"),
+                F.when(is_payment_tx, F.coalesce(F.col("p8_cdtr_account_id"), F.col("event_destination_account_id")))
+                .otherwise(F.lit(None).cast("string"))
+                .alias("cdtr_account_id"),
             )
             .filter(F.col("event_ts").isNotNull())
         )

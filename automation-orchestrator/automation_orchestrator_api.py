@@ -152,6 +152,16 @@ class TriggerRequest(BaseModel):
     object_key:       Optional[str] = ""
     execute_notebook: Optional[bool] = False
 
+
+def _normalized_request(req: TriggerRequest) -> TriggerRequest:
+    """Normalize request routing fields before the job enters the queue."""
+    table = FullETLOrchestrator._resolve_table_name(
+        table=req.table,
+        raw_path=req.raw_path,
+        object_key=req.object_key,
+    )
+    return req.copy(update={"table": table})
+
 # ===================================================================
 # SHARED STATE  (queue + view-build gate)
 # ===================================================================
@@ -223,6 +233,7 @@ def run_job(req: TriggerRequest) -> dict:
     print(f"[JOB] Starting ETL for: {req.raw_path}")
 
     spark = GLOBAL_SPARK if GLOBAL_SPARK else get_spark_session()
+    req = _normalized_request(req)
 
     result = FullETLOrchestrator(spark, DEFAULT_WAREHOUSE_ROOT).run(
         raw_path=req.raw_path,
@@ -263,7 +274,7 @@ def worker(worker_id: int) -> None:
         job_success = False
         try:
             print(f"[WORKER-{worker_id}] Processing: {req.raw_path}")
-            run_job(req)
+            job_result = run_job(req)
             print(f"[WORKER-{worker_id}] Done: {req.raw_path}")
             job_success = True
         except Exception as e:
@@ -272,9 +283,17 @@ def worker(worker_id: int) -> None:
         finally:
             job_queue.task_done()
 
-            if job_success and req.table:
+            completed_table = None
+            if job_success:
+                completed_table = (
+                    job_result.get("result", {}).get("table")
+                    if isinstance(job_result, dict)
+                    else None
+                ) or req.table
+
+            if job_success and completed_table:
                 with STATE_LOCK:
-                    COMPLETED_TABLES.add(req.table)
+                    COMPLETED_TABLES.add(completed_table)
 
             maybe_run_views_after_full_pipeline()
 
@@ -294,26 +313,31 @@ def submit(
     req: TriggerRequest,
     x_api_key: str = Header(None, description="API Key for authentication"),
 ):
+    normalized_req = _normalized_request(req)
+
     payload = {
-        "raw_path":         req.raw_path,
-        "bucket":           req.bucket,
-        "table":            req.table,
-        "object_key":       req.object_key,
-        "execute_notebook": req.execute_notebook,
+        "raw_path":         normalized_req.raw_path,
+        "bucket":           normalized_req.bucket,
+        "table":            normalized_req.table,
+        "object_key":       normalized_req.object_key,
+        "execute_notebook": normalized_req.execute_notebook,
     }
 
     # ------------------------------------------------------------------
     # Always queue the ETL job (non-blocking)
     # ------------------------------------------------------------------
     try:
-        job_queue.put(req)
-        print(f"[QUEUE] Added job: {req.raw_path or req.object_key} | Queue size: {job_queue.qsize()}")
+        job_queue.put(normalized_req)
+        print(
+            f"[QUEUE] Added job: {normalized_req.raw_path or normalized_req.object_key} "
+            f"| table={normalized_req.table} | Queue size: {job_queue.qsize()}"
+        )
         return {
             "status":   "queued",
             "message":  "ETL job added to queue",
-            "raw_path": req.raw_path,
-            "bucket":   req.bucket,
-            "table":    req.table,
+            "raw_path": normalized_req.raw_path,
+            "bucket":   normalized_req.bucket,
+            "table":    normalized_req.table,
             "data":     payload,
         }
     except Exception as e:

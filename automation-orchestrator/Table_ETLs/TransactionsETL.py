@@ -1,28 +1,21 @@
 """
 transactions.py
 ---------------
-Bronze → Silver → Gold ETL for the Transactions domain.
+Bronze -> Silver -> Gold ETL for event-history transactions from Ozone.
 
-Transactions are derived from PACS bronze tables.  Two modes:
-  - "from_pacs" : build from pacs008/pacs002 bronze (default when triggered by etl_pacs)
-  - "join"      : join a raw transaction feed against the PACS bronze tables
+The source dataframe is the raw event-history transactions table:
 
-Primary key
------------
-The record key is a composite of TxTp (message type) and EndToEndId, stored as
-a single derived column `transaction_id`:
+    amt, ccy, credttm, destination, endtoendid, msgid,
+    source, tenantid, transaction, txsts, txtp
 
-    transaction_id = TxTp + "||" + endToEndId   (plain string concatenation)
-
-For example: "pacs.008.001.10||2024-ABC-123-XYZ"
-
-This is human-readable, debuggable, and maps directly back to the source message.
-It is used as the Hudi record key at every layer (bronze, silver, gold).
+This ETL intentionally does not read or derive anything from payment message
+tables. The original Ozone column names are preserved across the transaction
+layers.
 """
 
 from __future__ import annotations
 
-from pyspark.sql import DataFrame, Column
+from pyspark.sql import Column
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
@@ -30,7 +23,7 @@ from .BaseETL import BaseETL
 
 
 class TransactionsETL(BaseETL):
-    """Full Bronze → Silver → Gold pipeline for transactions."""
+    """Full Bronze -> Silver -> Gold pipeline for Ozone event-history transactions."""
 
     @property
     def bronze_path(self) -> str:
@@ -45,178 +38,81 @@ class TransactionsETL(BaseETL):
         return f"{self.warehouse_root}/gold/transactions"
 
     # ------------------------------------------------------------------
-    # COMPOSITE KEY HELPER
+    # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _make_pk(tx_type_col: str, e2e_col: str) -> "Column":
-        """
-        Build the plain composite primary key.
-
-        transaction_id = TxTp + "||" + endToEndId
-
-        For example: "pacs.008.001.10||2024-ABC-123-XYZ"
-        Both inputs are coalesced to empty string so a null never breaks
-        the concat or produces an ambiguous key.
-        """
+    def _make_pk(tx_type_col: str, e2e_col: str) -> Column:
+        """Build transaction_id as TxTp || EndToEndId."""
         return F.concat_ws(
             "||",
             F.coalesce(F.col(tx_type_col), F.lit("")),
-            F.coalesce(F.col(e2e_col),      F.lit("")),
+            F.coalesce(F.col(e2e_col), F.lit("")),
         )
 
+    @staticmethod
+    def _event_ts(col_name: str) -> Column:
+        """Parse the ISO timestamp emitted by Ozone event history."""
+        return F.to_timestamp(F.regexp_replace(F.col(col_name).cast("string"), "Z$", ""))
+
     # ------------------------------------------------------------------
-    # INTERNAL: build rows from PACS bronze
-    # ------------------------------------------------------------------
-
-    def _transactions_from_pacs(self, df_pacs: DataFrame, source_label: str) -> DataFrame:
-        created_ts    = F.coalesce(F.col("credttm_ts"), F.col("ingested_at_ts"), F.current_timestamp())
-        created_at_ms = (created_ts.cast("long") * F.lit(1000)).cast("long")
-
-    # Handle the schema difference between pacs008 (document_json) and pacs002 (document)
-        if "document_json" in df_pacs.columns and "document" in df_pacs.columns:
-            tx_data = F.coalesce(F.col("document_json"), F.col("document").cast("string")).cast("string")
-        elif "document_json" in df_pacs.columns:
-            tx_data = F.col("document_json").cast("string")
-        elif "document" in df_pacs.columns:
-            tx_data = F.col("document").cast("string")
-        else:
-            raise ValueError(
-                f"[TransactionsETL] Neither 'document' nor 'document_json' found in {source_label} bronze. "
-                f"Available columns: {df_pacs.columns}"
-            )
-
-        # Extract TxTp from the JSON payload so the PK is available at ingest time.
-        tx_type_from_json = F.get_json_object(tx_data, "$.TxTp")
-
-        return (
-            df_pacs
-            .filter(F.col("end_to_end_id").isNotNull() & F.col("tenant_id").isNotNull())
-            .select(
-                created_at_ms.alias("createdAt"),
-                F.col("end_to_end_id").cast("string").alias("endToEndId"),
-                F.col("tenant_id").cast("string").alias("tenantId"),
-                tx_data.alias("transactionData"),
-                tx_type_from_json.alias("tx_type_raw"),
-            )
-        )
-    
-    # ------------------------------------------------------------------
-    # BRONZE
+    # Bronze
     # ------------------------------------------------------------------
 
-    def bronze(self, source_path: str, mode: str = "from_pacs") -> str:
-        pacs008_bronze_path = f"{self.warehouse_root}/bronze/pacs008"
-        pacs002_bronze_path = f"{self.warehouse_root}/bronze/pacs002"
-
-        df_pacs008 = self.spark.read.format("hudi").load(pacs008_bronze_path)
-        df_pacs002 = self.spark.read.format("hudi").load(pacs002_bronze_path)
-
-        if mode == "from_pacs":
-            raw = (
-                self._transactions_from_pacs(df_pacs008, "pacs008")
-                .unionByName(self._transactions_from_pacs(df_pacs002, "pacs002"))
-            )
-        else:
-            raw = self._join_mode(source_path, df_pacs008, df_pacs002)
+    def bronze(self, source_path: str) -> str:
+        raw = self.spark.read.json(source_path)
 
         bronze = (
             raw
-            .withColumn("createdAt",       F.col("createdAt").cast("long"))
-            .withColumn("endToEndId",      F.col("endToEndId").cast("string"))
-            .withColumn("tenantId",        F.col("tenantId").cast("string"))
-            .withColumn("transactionData", F.col("transactionData").cast("string"))
-            .withColumn("created_at_ts",   F.current_timestamp())
-            .withColumn("source_file_path", F.lit(source_path))
-            # Resolve tx_type from the pre-extracted column or re-parse the JSON
-            .withColumn(
-                "tx_type",
-                F.coalesce(
-                    F.col("tx_type_raw"),
-                    F.get_json_object("transactionData", "$.TxTp"),
-                ),
-            )
-            # Composite PK: TxTp || endToEndId (plain string, no hashing)
-            .withColumn("transaction_id", self._make_pk("tx_type", "endToEndId"))
+            .withColumn("amt", F.col("amt").cast("double"))
+            .withColumn("ccy", F.col("ccy").cast("string"))
+            .withColumn("credttm", F.col("credttm").cast("string"))
+            .withColumn("destination", F.col("destination").cast("string"))
+            .withColumn("endtoendid", F.col("endtoendid").cast("string"))
+            .withColumn("msgid", F.col("msgid").cast("string"))
+            .withColumn("source", F.col("source").cast("string"))
+            .withColumn("tenantid", F.col("tenantid").cast("string"))
+            .withColumn("transaction", F.col("transaction").cast("string"))
+            .withColumn("txsts", F.col("txsts").cast("string"))
+            .withColumn("txtp", F.col("txtp").cast("string"))
+            .withColumn("event_ts", self._event_ts("credttm"))
+            .withColumn("event_date", F.to_date("event_ts"))
+            .withColumn("created_at_epoch_ms", (F.col("event_ts").cast("long") * F.lit(1000)).cast("long"))
+            .withColumn("transaction_id", self._make_pk("txtp", "endtoendid"))
+            .withColumn("ingested_at_ts", F.current_timestamp())
+            .withColumn("source_file_path", F.input_file_name())
             .withColumn(
                 "record_hash",
                 F.sha2(
                     F.concat_ws(
                         "||",
-                        F.col("endToEndId"),
-                        F.col("tenantId"),
-                        F.col("createdAt").cast("string"),
-                        F.col("transactionData"),
+                        F.coalesce(F.col("amt").cast("string"), F.lit("")),
+                        F.coalesce(F.col("ccy"), F.lit("")),
+                        F.coalesce(F.col("credttm"), F.lit("")),
+                        F.coalesce(F.col("destination"), F.lit("")),
+                        F.coalesce(F.col("endtoendid"), F.lit("")),
+                        F.coalesce(F.col("msgid"), F.lit("")),
+                        F.coalesce(F.col("source"), F.lit("")),
+                        F.coalesce(F.col("tenantid"), F.lit("")),
+                        F.coalesce(F.col("txsts"), F.lit("")),
+                        F.coalesce(F.col("txtp"), F.lit("")),
                     ),
                     256,
                 ),
             )
-            .withColumn("_row_payload_json", F.to_json(F.struct("*")))
-            .drop("tx_type_raw")
+            .withColumn("_row_payload_json", F.to_json(F.struct(*[F.col(c) for c in raw.columns])))
         )
 
         self.write_hudi(
             bronze,
             self.bronze_path,
-            # Hudi record key is the composite PK column
-            self.hudi_opts("transactions", "transaction_id", "created_at_ts"),
+            self.hudi_opts("bronze_transactions", "transaction_id", "ingested_at_ts"),
         )
-        print(f"[TransactionsETL] Bronze written → {self.bronze_path}")
+        print(f"[TransactionsETL] Bronze written -> {self.bronze_path}")
         return self.bronze_path
 
     # ------------------------------------------------------------------
-    # JOIN MODE (legacy)
-    # ------------------------------------------------------------------
-
-    def _join_mode(self, source_path: str, df_pacs008: DataFrame, df_pacs002: DataFrame) -> DataFrame:
-        """Legacy: join raw transaction feed against PACS bronze tables."""
-        df_tx = self.spark.read.json(source_path)
-
-        pacs008_rows = (
-            df_tx.filter(F.col("txtp") == "pacs.008.001.10")
-            .join(
-                df_pacs008.select(F.col("end_to_end_id").alias("p8_id"), F.col("document")),
-                df_tx.endtoendid == F.col("p8_id"),
-                "inner",
-            )
-            .select(
-                (F.unix_timestamp("credttm") * 1000).alias("createdAt"),
-                F.col("endtoendid").alias("endToEndId"),
-                F.col("tenantid").alias("tenantId"),
-                F.col("document").alias("transactionData"),
-                F.col("txtp").alias("tx_type_raw"),
-            )
-        )
-
-        pacs002_rows = (
-            df_tx.filter(F.col("txtp") == "pacs.002.001.12")
-            .join(
-                df_pacs002.select(F.col("end_to_end_id").alias("p2_id"), F.col("document")),
-                df_tx.endtoendid == F.col("p2_id"),
-                "inner",
-            )
-            .select(
-                (F.unix_timestamp("credttm") * 1000).alias("createdAt"),
-                F.col("endtoendid").alias("endToEndId"),
-                F.col("tenantid").alias("tenantId"),
-                F.col("document").alias("transactionData"),
-                F.col("txtp").alias("tx_type_raw"),
-            )
-        )
-
-        combined = pacs008_rows.unionByName(pacs002_rows)
-
-        if combined.rdd.isEmpty():
-            print("[TransactionsETL] Join produced 0 rows; falling back to from_pacs.")
-            return (
-                self._transactions_from_pacs(df_pacs008, "pacs008")
-                .unionByName(self._transactions_from_pacs(df_pacs002, "pacs002"))
-            )
-
-        return combined
-
-    # ------------------------------------------------------------------
-    # SILVER
+    # Silver
     # ------------------------------------------------------------------
 
     def silver(self) -> str:
@@ -224,75 +120,36 @@ class TransactionsETL(BaseETL):
 
         s = (
             b
-            # Re-resolve tx_type in case it was null at bronze time
-            .withColumn(
-                "tx_type",
-                F.coalesce(
-                    F.col("tx_type"),
-                    F.get_json_object("transactionData", "$.TxTp"),
-                ),
-            )
-            .withColumn("tx_tenant_id",  F.get_json_object("transactionData", "$.TenantId"))
-            # pacs.008 paths
-            .withColumn("msg_id_008",  F.get_json_object("transactionData", "$.FIToFICstmrCdtTrf.GrpHdr.MsgId"))
-            .withColumn("created_008", F.get_json_object("transactionData", "$.FIToFICstmrCdtTrf.GrpHdr.CreDtTm"))
-            # pacs.002 paths
-            .withColumn("msg_id_002",  F.get_json_object("transactionData", "$.FIToFIPmtSts.GrpHdr.MsgId"))
-            .withColumn("created_002", F.get_json_object("transactionData", "$.FIToFIPmtSts.GrpHdr.CreDtTm"))
-            .withColumn("tx_msg_id",     F.coalesce("msg_id_008", "msg_id_002"))
-            .withColumn("tx_created_ts", F.to_timestamp(F.coalesce("created_008", "created_002")))
-            .withColumn("tx_status",     F.get_json_object("transactionData", "$.FIToFIPmtSts.TxInfAndSts.TxSts"))
-            .withColumn("tx_accept_ts",  F.to_timestamp(F.get_json_object("transactionData", "$.FIToFIPmtSts.TxInfAndSts.AccptncDtTm")))
-            .withColumn("event_ts",      F.col("tx_created_ts"))
-            .withColumn("event_date",    F.to_date("event_ts"))
-            .withColumn(
-                "instg_mmb_id",
-                F.coalesce(
-                    F.get_json_object("transactionData", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAgt.FinInstnId.ClrSysMmbId.MmbId"),
-                    F.get_json_object("transactionData", "$.FIToFIPmtSts.TxInfAndSts.InstgAgt.FinInstnId.ClrSysMmbId.MmbId"),
-                ),
-            )
-            .withColumn(
-                "instd_mmb_id",
-                F.coalesce(
-                    F.get_json_object("transactionData", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAgt.FinInstnId.ClrSysMmbId.MmbId"),
-                    F.get_json_object("transactionData", "$.FIToFIPmtSts.TxInfAndSts.InstdAgt.FinInstnId.ClrSysMmbId.MmbId"),
-                ),
-            )
-            .withColumn("tx_amount", F.get_json_object("transactionData", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Amt").cast("double"))
-            .withColumn("tx_ccy",    F.get_json_object("transactionData", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Ccy").cast("string"))
-            .withColumn("charges_002_json", F.get_json_object("transactionData", "$.FIToFIPmtSts.TxInfAndSts.ChrgsInf"))
-            .withColumn("charges_008_amt",  F.get_json_object("transactionData", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.ChrgsInf.Amt.Amt").cast("double"))
-            .withColumn(
-                "charge_count",
-                F.when(
-                    F.col("charges_002_json").isNotNull(),
-                    F.size(F.from_json(
-                        "charges_002_json",
-                        "array<struct<Agt:struct<FinInstnId:struct<ClrSysMmbId:struct<MmbId:string>>>,Amt:struct<Amt:double,Ccy:string>>>",
-                    )),
-                ).otherwise(
-                    F.when(F.col("charges_008_amt").isNotNull(), F.lit(1)).otherwise(F.lit(0))
-                ),
-            )
-            # Recompute composite PK with the now-resolved tx_type (covers null-at-bronze cases)
-            .withColumn("transaction_id", self._make_pk("tx_type", "endToEndId"))
+            .withColumn("amt", F.col("amt").cast("double"))
+            .withColumn("ccy", F.col("ccy").cast("string"))
+            .withColumn("credttm", F.col("credttm").cast("string"))
+            .withColumn("destination", F.col("destination").cast("string"))
+            .withColumn("endtoendid", F.col("endtoendid").cast("string"))
+            .withColumn("msgid", F.col("msgid").cast("string"))
+            .withColumn("source", F.col("source").cast("string"))
+            .withColumn("tenantid", F.col("tenantid").cast("string"))
+            .withColumn("transaction", F.col("transaction").cast("string"))
+            .withColumn("txsts", F.col("txsts").cast("string"))
+            .withColumn("txtp", F.col("txtp").cast("string"))
+            .withColumn("event_ts", F.col("event_ts").cast("timestamp"))
+            .withColumn("event_date", F.to_date("event_ts"))
+            .withColumn("created_at_epoch_ms", F.col("created_at_epoch_ms").cast("long"))
+            .withColumn("transaction_id", self._make_pk("txtp", "endtoendid"))
         )
 
-        # Dedup: keep latest per composite key
-        w = Window.partitionBy("transaction_id").orderBy(F.col("created_at_ts").desc())
-        silver = s.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
+        w = Window.partitionBy("transaction_id").orderBy(F.col("ingested_at_ts").desc())
+        silver = s.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
 
         self.write_hudi(
             silver,
             self.silver_path,
-            self.hudi_opts("silver_transactions", "transaction_id", "created_at_ts"),
+            self.hudi_opts("silver_transactions", "transaction_id", "ingested_at_ts"),
         )
-        print(f"[TransactionsETL] Silver written → {self.silver_path}")
+        print(f"[TransactionsETL] Silver written -> {self.silver_path}")
         return self.silver_path
 
     # ------------------------------------------------------------------
-    # GOLD
+    # Gold
     # ------------------------------------------------------------------
 
     def gold(self) -> str:
@@ -304,52 +161,55 @@ class TransactionsETL(BaseETL):
                 "event_to_ingest_ms",
                 F.when(
                     F.col("event_ts").isNotNull(),
-                    (F.col("created_at_ts").cast("long") - F.col("event_ts").cast("long")) * 1000,
+                    (F.col("ingested_at_ts").cast("long") - F.col("event_ts").cast("long")) * 1000,
                 ).otherwise(F.lit(None).cast("long")),
             )
             .select(
-                # Composite PK carried through to gold
                 F.col("transaction_id").cast("string").alias("transaction_id"),
-                F.col("endToEndId").cast("string").alias("end_to_end_id"),
-                F.col("tenantId").cast("string").alias("tenant_id"),
-                F.col("tx_type").cast("string").alias("tx_type"),
-                F.col("tx_msg_id").cast("string").alias("tx_msg_id"),
-                F.col("tx_status").cast("string").alias("tx_status"),
-                F.col("tx_amount").cast("double").alias("tx_amount"),
-                F.col("tx_ccy").cast("string").alias("tx_ccy"),
-                F.col("instg_mmb_id").cast("string").alias("instg_mmb_id"),
-                F.col("instd_mmb_id").cast("string").alias("instd_mmb_id"),
-                F.col("charge_count").cast("int").alias("charge_count"),
+                F.col("amt").cast("double").alias("amt"),
+                F.col("ccy").cast("string").alias("ccy"),
+                F.col("credttm").cast("string").alias("credttm"),
+                F.col("destination").cast("string").alias("destination"),
+                F.col("endtoendid").cast("string").alias("endtoendid"),
+                F.col("msgid").cast("string").alias("msgid"),
+                F.col("source").cast("string").alias("source"),
+                F.col("tenantid").cast("string").alias("tenantid"),
+                F.col("txsts").cast("string").alias("txsts"),
+                F.col("txtp").cast("string").alias("txtp"),
                 F.col("event_ts").cast("timestamp").alias("event_ts"),
                 F.col("event_date").cast("date").alias("event_date"),
-                F.col("created_at_ts").cast("timestamp").alias("ingested_at_ts"),
+                F.col("created_at_epoch_ms").cast("long").alias("created_at_epoch_ms"),
+                F.col("ingested_at_ts").cast("timestamp").alias("ingested_at_ts"),
                 F.col("event_to_ingest_ms").cast("long").alias("event_to_ingest_ms"),
                 F.col("source_file_path").cast("string").alias("source_file_path"),
                 F.col("record_hash").cast("string").alias("record_hash"),
             )
         )
 
-        bad = [c for c, t in gold.dtypes if t.startswith(("array", "struct"))]
+        bad = [c for c, t in gold.dtypes if t.startswith(("array", "struct", "map"))]
         if bad:
             raise RuntimeError(f"[TransactionsETL] Gold contains non-scalar cols: {bad}")
 
-        gold_opts = {
-            **self.hudi_opts("transactions", "transaction_id", "ingested_at_ts"),
-            "hoodie.datasource.write.payload.class": "org.apache.hudi.common.model.OverwriteWithLatestAvroPayload",
-        }
-        self.write_hudi(gold, self.gold_path, gold_opts)
-        print(f"[TransactionsETL] Gold written → {self.gold_path}")
+        self.write_hudi(
+            gold,
+            self.gold_path,
+            self.hudi_opts(
+                "transactions",
+                "transaction_id",
+                "ingested_at_ts",
+                payload_class="org.apache.hudi.common.model.OverwriteWithLatestAvroPayload",
+            ),
+        )
+        print(f"[TransactionsETL] Gold written -> {self.gold_path}")
         return self.gold_path
 
     # ------------------------------------------------------------------
-    # ORCHESTRATOR
+    # Orchestrator
     # ------------------------------------------------------------------
 
-    def run(self, source_path: str, mode: str = "from_pacs") -> str:
-        if mode not in {"join", "from_pacs"}:
-            raise ValueError(f"mode must be 'join' or 'from_pacs' (got: {mode!r})")
-        print(f"[TransactionsETL] Starting Bronze → Silver → Gold (mode={mode}) from {source_path}")
-        self.bronze(source_path, mode=mode)
+    def run(self, source_path: str) -> str:
+        print(f"[TransactionsETL] Starting Bronze -> Silver -> Gold from {source_path}")
+        self.bronze(source_path)
         self.silver()
         self.gold()
         print("[TransactionsETL] ETL complete.")

@@ -2,7 +2,7 @@
 transaction_detail_view.py
 --------------------------
 Builds the vw_transaction_detail view from bronze/transactions.
-Parses pacs.008 + pacs.002 JSON and writes a denormalized Hudi view.
+Joins PACS gold enrichment and writes a denormalized Hudi view.
 
 Carries forward the composite primary key transaction_id
 (TxTp || "||" || endToEndId) from TransactionsETL as the sole primary key.
@@ -10,8 +10,9 @@ Carries forward the composite primary key transaction_id
 
 from __future__ import annotations
 
-from pyspark.sql import DataFrame
+from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
 from .BaseETL import BaseETL
 
@@ -20,8 +21,8 @@ class TransactionDetailViewETL(BaseETL):
     """
     Transaction Detail View builder.
 
-    Reads bronze/transactions, extracts embedded PACS JSON fields,
-    and writes vw_transaction_detail as a Hudi view.
+    Reads bronze/transactions, joins PACS gold enrichment, and writes
+    vw_transaction_detail as a Hudi view.
 
     Uses transaction_id (TxTp||endToEndId) as the primary key.
     """
@@ -31,6 +32,8 @@ class TransactionDetailViewETL(BaseETL):
         self.views_root = f"{self.warehouse_root}/views"
         self.view_path = f"{self.views_root}/vw_transaction_detail"
         self.transactions_bronze_path = f"{self.warehouse_root}/bronze/transactions"
+        self.pacs008_gold_path = f"{self.warehouse_root}/gold/pacs008"
+        self.pacs002_gold_path = f"{self.warehouse_root}/gold/pacs002"
 
     @property
     def bronze_path(self) -> str:
@@ -48,132 +51,152 @@ class TransactionDetailViewETL(BaseETL):
     # INTERNAL HELPERS
     # ------------------------------------------------------------------
 
-    def _resolve_json_column(self, df: DataFrame) -> DataFrame:
-        """Auto-detect and normalize the raw JSON payload column."""
-        candidates = [
-            "transactionData",
-            "transaction_data",
-            "transaction",
-            "payload",
-            "raw_payload",
-            "raw_json",
-            "transaction_json",
-        ]
-        json_col = next((c for c in candidates if c in df.columns), None)
-        if json_col is None:
-            raise ValueError(
-                f"No raw JSON column found in bronze/transactions. "
-                f"Tried: {candidates}\nAvailable: {df.columns}"
+    def _safe_load(self, path: str, select_expr: list | None = None) -> DataFrame | None:
+        """Attempt to load a Hudi table; return None if it does not exist."""
+        try:
+            df = self.spark.read.format("hudi").load(path)
+            if select_expr:
+                df = df.select(*select_expr)
+            return df
+        except Exception:
+            return None
+
+    @staticmethod
+    def _event_ts(col_name: str) -> Column:
+        """Parse the ISO timestamp emitted by Ozone event history."""
+        return F.to_timestamp(F.regexp_replace(F.col(col_name).cast("string"), "Z$", ""))
+
+    @staticmethod
+    def _first_available(df: DataFrame, *names: str) -> Column:
+        """Return the first available column from the transaction table."""
+        cols = [F.col(name) for name in names if name in df.columns]
+        if cols:
+            return F.coalesce(*cols)
+        return F.lit(None)
+
+    def _normalize_transactions(self, tx: DataFrame) -> DataFrame:
+        """Normalize Ozone transaction columns without changing view output names."""
+        tx = (
+            tx
+            .withColumn("view_endtoendid", self._first_available(tx, "endtoendid", "raw_history_endtoendid", "endToEndId").cast("string"))
+            .withColumn("view_tenantid", self._first_available(tx, "tenantid", "raw_history_tenantid", "tenantId").cast("string"))
+            .withColumn("view_txtp", self._first_available(tx, "txtp", "raw_history_txtp", "tx_type").cast("string"))
+            .withColumn("view_msgid", self._first_available(tx, "msgid", "raw_history_msgid", "tx_msg_id").cast("string"))
+            .withColumn("view_credttm", self._first_available(tx, "credttm", "raw_history_credttm").cast("string"))
+            .withColumn("view_amt", self._first_available(tx, "amt", "raw_history_amt").cast("double"))
+            .withColumn("view_ccy", self._first_available(tx, "ccy", "raw_history_ccy").cast("string"))
+        )
+        return (
+            tx
+            .withColumn("end_to_end_id", F.col("view_endtoendid"))
+            .withColumn("tenant_id", F.col("view_tenantid"))
+            .withColumn("tx_tenant_id", F.col("view_tenantid"))
+            .withColumn("tx_type", F.col("view_txtp"))
+            .withColumn("tx_msg_id", F.col("view_msgid"))
+            .withColumn("tx_event_ts", F.coalesce(self._first_available(tx, "event_ts").cast("timestamp"), self._event_ts("view_credttm")))
+            .withColumn("tx_event_date", F.to_date("tx_event_ts"))
+            .withColumn("tx_amount_from_event", F.col("view_amt"))
+            .withColumn("tx_ccy_from_event", F.col("view_ccy"))
+        )
+
+    def _join_payment_enrichment(self, tx: DataFrame) -> DataFrame:
+        """Join transactions to PACS gold tables while preserving view schema."""
+        p8 = self._safe_load(
+            self.pacs008_gold_path,
+            select_expr=[
+                F.col("end_to_end_id").cast("string").alias("p8_end_to_end_id"),
+                F.col("tx_tenant_id").cast("string").alias("p8_tx_tenant_id"),
+                F.col("dbtr_name").cast("string").alias("p8_dbtr_name"),
+                F.col("dbtr_id").cast("string").alias("p8_dbtr_id"),
+                F.col("cdtr_name").cast("string").alias("p8_cdtr_name"),
+                F.col("cdtr_id").cast("string").alias("p8_cdtr_id"),
+                F.coalesce(F.col("dbtr_acct_id"), F.col("dc_dbtr_acct_id"), F.col("debtor_account_id")).cast("string").alias("p8_dbtr_account_id"),
+                F.coalesce(F.col("cdtr_acct_id"), F.col("dc_cdtr_acct_id"), F.col("creditor_account_id")).cast("string").alias("p8_cdtr_account_id"),
+                F.coalesce(F.col("instd_amt"), F.col("dc_instd_amt")).cast("double").alias("p8_instructed_amount"),
+                F.coalesce(F.col("instd_ccy"), F.col("dc_instd_ccy")).cast("string").alias("p8_instructed_currency"),
+                F.coalesce(F.col("intrbk_amt"), F.col("dc_intrbk_amt")).cast("double").alias("p8_interbank_settlement_amount"),
+                F.coalesce(F.col("intrbk_ccy"), F.col("dc_intrbk_ccy")).cast("string").alias("p8_interbank_settlement_currency"),
+                F.col("xchg_rate").cast("double").alias("p8_exchange_rate"),
+                F.col("dbtr_agt_mmb_id").cast("string").alias("p8_instg_mmb_id"),
+                F.col("cdtr_agt_mmb_id").cast("string").alias("p8_instd_mmb_id"),
+                F.col("charge_amt").cast("double").alias("p8_charge_total_amount"),
+                F.col("charge_ccy").cast("string").alias("p8_charge_currency"),
+            ],
+        )
+        p2 = self._safe_load(
+            self.pacs002_gold_path,
+            select_expr=[
+                F.col("message_id").cast("string").alias("p2_message_id"),
+                F.col("tx_tenant_id").cast("string").alias("p2_tx_tenant_id"),
+                F.col("instg_mmb_id").cast("string").alias("p2_instg_mmb_id"),
+                F.col("instd_mmb_id").cast("string").alias("p2_instd_mmb_id"),
+                F.col("charge_count").cast("int").alias("p2_charge_count"),
+                F.col("charge_total_amount").cast("double").alias("p2_charge_total_amount"),
+                F.col("charge_currency_hint").cast("string").alias("p2_charge_currency"),
+                F.col("ingested_at_ts").cast("timestamp").alias("p2_ingested_at_ts"),
+            ],
+        )
+
+        joined = tx
+        if p8 is not None:
+            joined = joined.join(p8, joined.end_to_end_id == p8.p8_end_to_end_id, "left")
+        if p2 is not None:
+            w = Window.partitionBy("p2_tx_tenant_id", "p2_message_id").orderBy(F.col("p2_ingested_at_ts").desc_nulls_last())
+            p2 = p2.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
+            joined = joined.join(
+                p2,
+                (joined.tx_msg_id == p2.p2_message_id) & (joined.tx_tenant_id == p2.p2_tx_tenant_id),
+                "left",
             )
-        print(f"[TransactionDetailViewETL] Using JSON column: {json_col} → transaction_data")
-        return df.withColumn("transaction_data", F.col(json_col).cast("string"))
 
-    def _extract_pacs_fields(self, df: DataFrame) -> DataFrame:
-        """Add all PACS-derived columns from the JSON payload."""
-        # --- core identifiers ------------------------------------------------
-        tx_type = F.get_json_object("transaction_data", "$.TxTp")
-        tx_msg_id = F.coalesce(
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.GrpHdr.MsgId"),
-            F.get_json_object("transaction_data", "$.FIToFIPmtSts.GrpHdr.MsgId"),
+        joined = self.ensure_columns(
+            joined,
+            {
+                "p8_tx_tenant_id": "string",
+                "p8_dbtr_name": "string",
+                "p8_dbtr_id": "string",
+                "p8_cdtr_name": "string",
+                "p8_cdtr_id": "string",
+                "p8_dbtr_account_id": "string",
+                "p8_cdtr_account_id": "string",
+                "p8_instructed_amount": "double",
+                "p8_instructed_currency": "string",
+                "p8_interbank_settlement_amount": "double",
+                "p8_interbank_settlement_currency": "string",
+                "p8_exchange_rate": "double",
+                "p8_instg_mmb_id": "string",
+                "p8_instd_mmb_id": "string",
+                "p8_charge_total_amount": "double",
+                "p8_charge_currency": "string",
+                "p2_tx_tenant_id": "string",
+                "p2_instg_mmb_id": "string",
+                "p2_instd_mmb_id": "string",
+                "p2_charge_count": "int",
+                "p2_charge_total_amount": "double",
+                "p2_charge_currency": "string",
+                "p2_ingested_at_ts": "timestamp",
+            },
         )
-        tx_event_ts = F.to_timestamp(
-            F.coalesce(
-                F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.GrpHdr.CreDtTm"),
-                F.get_json_object("transaction_data", "$.FIToFIPmtSts.GrpHdr.CreDtTm"),
-            )
-        )
-        tx_event_date = F.to_date(tx_event_ts)
-        tx_tenant = F.get_json_object("transaction_data", "$.TenantId")
-
-        # --- parties ---------------------------------------------------------
-        dbtr_name = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Nm")
-        dbtr_id = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Id.PrvtId.Othr[0].Id")
-        cdtr_name = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Nm")
-        cdtr_id = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Id.PrvtId.Othr[0].Id")
-
-        dbtr_acct_id = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr[0].Id")
-        cdtr_acct_id = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr[0].Id")
-
-        # --- amounts ---------------------------------------------------------
-        instd_amt = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Amt").cast("double")
-        instd_ccy = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Ccy")
-
-        intrbk_amt = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.IntrBkSttlmAmt.Amt.Amt").cast("double")
-        intrbk_ccy = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.IntrBkSttlmAmt.Amt.Ccy")
-        xchg_rate = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.XchgRate").cast("double")
-
-        # --- agents ----------------------------------------------------------
-        instg_mmb_id = F.coalesce(
-            F.get_json_object("transaction_data", "$.FIToFIPmtSts.TxInfAndSts.InstgAgt.FinInstnId.ClrSysMmbId.MmbId"),
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAgt.FinInstnId.ClrSysMmbId.MmbId"),
-        )
-        instd_mmb_id = F.coalesce(
-            F.get_json_object("transaction_data", "$.FIToFIPmtSts.TxInfAndSts.InstdAgt.FinInstnId.ClrSysMmbId.MmbId"),
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAgt.FinInstnId.ClrSysMmbId.MmbId"),
-        )
-
-        # --- charges (pacs.002 array vs pacs.008 struct) ---------------------
-        charges_arr_json = F.get_json_object("transaction_data", "$.FIToFIPmtSts.TxInfAndSts.ChrgsInf")
-        charges_obj_json = F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.ChrgsInf")
-
-        charges_arr_schema = "array<struct<Agt:struct<FinInstnId:struct<ClrSysMmbId:struct<MmbId:string>>>,Amt:struct<Amt:double,Ccy:string>>>"
-        charges_obj_schema = "struct<Agt:struct<FinInstnId:struct<ClrSysMmbId:struct<MmbId:string>>>,Amt:struct<Amt:double,Ccy:string>>"
 
         return (
-            df
-            .withColumn("tx_type", tx_type)
-            .withColumn("tx_msg_id", tx_msg_id)
-            .withColumn("tx_event_ts", tx_event_ts)
-            .withColumn("tx_event_date", tx_event_date)
-            .withColumn("tx_tenant_id", tx_tenant)
-            .withColumn("debtor_name", dbtr_name)
-            .withColumn("debtor_id", dbtr_id)
-            .withColumn("creditor_name", cdtr_name)
-            .withColumn("creditor_id", cdtr_id)
-            .withColumn("debtor_account_id", dbtr_acct_id)
-            .withColumn("creditor_account_id", cdtr_acct_id)
-            .withColumn("instructed_amount", instd_amt)
-            .withColumn("instructed_currency", instd_ccy)
-            .withColumn("interbank_settlement_amount", intrbk_amt)
-            .withColumn("interbank_settlement_currency", intrbk_ccy)
-            .withColumn("exchange_rate", xchg_rate)
-            .withColumn("instg_mmb_id", instg_mmb_id)
-            .withColumn("instd_mmb_id", instd_mmb_id)
-            .withColumn("charges_arr", F.from_json(charges_arr_json, charges_arr_schema))
-            .withColumn("charges_obj", F.from_json(charges_obj_json, charges_obj_schema))
-            .withColumn(
-                "charge_count",
-                F.when(F.col("charges_arr").isNotNull(), F.size("charges_arr"))
-                .when(F.col("charges_obj").isNotNull(), F.lit(1))
-                .otherwise(F.lit(0))
-                .cast("int"),
-            )
-            .withColumn(
-                "charge_total_amount",
-                F.when(
-                    F.col("charges_arr").isNotNull(),
-                    F.expr(
-                        "aggregate(transform(charges_arr, x -> coalesce(x.Amt.Amt, 0D)), "
-                        "0D, (acc, x) -> acc + x)"
-                    ),
-                )
-                .when(
-                    F.col("charges_obj").isNotNull(),
-                    F.coalesce(F.col("charges_obj.Amt.Amt").cast("double"), F.lit(0.0)),
-                )
-                .otherwise(F.lit(0.0))
-                .cast("double"),
-            )
-            .withColumn(
-                "charge_currency",
-                F.when(
-                    F.col("charges_arr").isNotNull(),
-                    F.expr("element_at(transform(charges_arr, x -> x.Amt.Ccy), 1)"),
-                )
-                .when(F.col("charges_obj").isNotNull(), F.col("charges_obj.Amt.Ccy"))
-                .otherwise(F.lit(None).cast("string")),
-            )
-            .drop("charges_arr", "charges_obj")
+            joined
+            .withColumn("tx_tenant_id", F.coalesce(F.col("tx_tenant_id"), F.col("p2_tx_tenant_id"), F.col("p8_tx_tenant_id")))
+            .withColumn("debtor_name", F.col("p8_dbtr_name"))
+            .withColumn("debtor_id", F.col("p8_dbtr_id"))
+            .withColumn("creditor_name", F.col("p8_cdtr_name"))
+            .withColumn("creditor_id", F.col("p8_cdtr_id"))
+            .withColumn("debtor_account_id", F.col("p8_dbtr_account_id"))
+            .withColumn("creditor_account_id", F.col("p8_cdtr_account_id"))
+            .withColumn("instructed_amount", F.coalesce(F.col("p8_instructed_amount"), F.col("tx_amount_from_event")))
+            .withColumn("instructed_currency", F.coalesce(F.col("p8_instructed_currency"), F.col("tx_ccy_from_event")))
+            .withColumn("interbank_settlement_amount", F.col("p8_interbank_settlement_amount"))
+            .withColumn("interbank_settlement_currency", F.col("p8_interbank_settlement_currency"))
+            .withColumn("exchange_rate", F.col("p8_exchange_rate"))
+            .withColumn("instg_mmb_id", F.coalesce(F.col("p2_instg_mmb_id"), F.col("p8_instg_mmb_id")))
+            .withColumn("instd_mmb_id", F.coalesce(F.col("p2_instd_mmb_id"), F.col("p8_instd_mmb_id")))
+            .withColumn("charge_count", F.coalesce(F.col("p2_charge_count"), F.when(F.col("p8_charge_total_amount").isNotNull(), F.lit(1)).otherwise(F.lit(0))).cast("int"))
+            .withColumn("charge_total_amount", F.coalesce(F.col("p2_charge_total_amount"), F.col("p8_charge_total_amount"), F.lit(0.0)).cast("double"))
+            .withColumn("charge_currency", F.coalesce(F.col("p2_charge_currency"), F.col("p8_charge_currency")))
         )
 
     def _finalize_schema(self, df: DataFrame) -> DataFrame:
@@ -234,26 +257,16 @@ class TransactionDetailViewETL(BaseETL):
         # 1. Load bronze transactions
         tx = self.spark.read.format("hudi").load(self.transactions_bronze_path)
 
-        # 2. Normalize column names
-        rename_map = {
-            "endToEndId": "end_to_end_id",
-            "tenantId": "tenant_id",
-            "transaction_id": "transaction_id",
-        }
-        for src, dst in rename_map.items():
-            if src in tx.columns and dst not in tx.columns:
-                tx = tx.withColumnRenamed(src, dst)
+        # 2. Normalize Ozone transaction columns
+        tx = self._normalize_transactions(tx)
 
-        # 3. Resolve JSON column
-        tx = self._resolve_json_column(tx)
+        # 3. Join PACS enrichment without changing the output schema
+        tx = self._join_payment_enrichment(tx)
 
-        # 4. Extract PACS fields
-        tx = self._extract_pacs_fields(tx)
-
-        # 5. Finalize schema
+        # 4. Finalize schema
         tx_detail_view = self._finalize_schema(tx)
 
-        # 6. Write Hudi view — transaction_id is the primary key
+        # 5. Write Hudi view — transaction_id is the primary key
         self.write_hudi(
             tx_detail_view,
             self.view_path,
