@@ -484,8 +484,7 @@ class AlertNavigatorETL(BaseETL):
                 "network_message_cfg",
                 "network_tx_type",
                 F.col("t.id").alias("typology_id"),
-                F.col("t.cfg").alias("typology_cfg"),
-                F.col("t.tenantId").alias("typology_tenant_id"),
+                F.col("t.cfg").alias("typology_cfg"),              
                 F.explode_outer(F.col("t.rules")).alias("r"),
             )
             .select(
