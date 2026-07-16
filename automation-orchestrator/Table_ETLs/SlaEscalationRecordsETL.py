@@ -33,6 +33,7 @@ class SlaEscalationRecordsETL(BaseETL):
         bronze = (
             raw
             .withColumn("id", F.col("id").cast("long"))
+            .withColumn("tenant_id", F.col("tenant_id").cast("string"))
             .withColumn("case_id", F.col("case_id").cast("long"))
             .withColumn("notified_at", F.col("notified_at").cast("long"))
             .withColumn("sla_state", F.col("sla_state").cast("string"))
@@ -55,6 +56,7 @@ class SlaEscalationRecordsETL(BaseETL):
         silver = (
             b
             .withColumn("id", F.col("id").cast("long"))
+            .withColumn("tenant_id", F.col("tenant_id").cast("string"))
             .withColumn("case_id", F.col("case_id").cast("long"))
             .withColumn("notified_at", F.col("notified_at").cast("long"))
             .withColumn("sla_state", F.upper(F.col("sla_state").cast("string")))
@@ -78,6 +80,7 @@ class SlaEscalationRecordsETL(BaseETL):
 
         gold = s.select(
             F.col("id").cast("long").alias("id"),
+            F.col("tenant_id").cast("string").alias("tenant_id"),
             F.col("case_id").cast("long").alias("case_id"),
             F.col("notified_at").cast("long").alias("notified_at"),
             F.col("notified_at_ts").cast("timestamp").alias("notified_at_ts"),
