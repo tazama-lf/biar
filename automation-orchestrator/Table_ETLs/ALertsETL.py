@@ -222,7 +222,7 @@ class AlertsETL(BaseETL):
                                 filter(
                                     t.ruleResults,
                                     r -> r is not null
-                                        AND r.id = 'EFRuP@1.0.0'
+                                        AND r.id RLIKE '^EFRuP@[0-9]+\\.[0-9]+\\.[0-9]+$'
                                 ),
                                 r -> r.subRuleRef
                             )
