@@ -224,16 +224,16 @@ services:
     depends_on:
       - s3g
 
-  jupyterlab:
+  jupyterhub:
     build:
       context: ./JupyterHub
       dockerfile: Dockerfile
-    container_name: biar-jupyterlab
+    container_name: biar-jupyterhub
     restart: unless-stopped
     env_file:
       - .env
     ports:
-      - "${JUPYTERLAB_PORT}:8000"
+      - "${JUPYTERHUB_PORT}:8000"
     volumes:
       - ./JupyterHub/notebooks:/srv/notebooks
       - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Warehouse
