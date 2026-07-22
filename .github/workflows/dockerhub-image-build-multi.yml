@@ -9,9 +9,9 @@
 # To get a newer version, you will need to update the SHA.
 # You can also reference a tag or branch, but the action may change without warning.
 
-# This workflow is for the BIAR repository which produces five Docker images,
-# each built from its own subdirectory and versioned from
-# unstructured-pipeline/package.json.
+# This workflow is for the BIAR repository which produces multiple Docker images,
+# each built from its own subdirectory via a build matrix.
+# All images share the version from unstructured-pipeline/package.json.
 
 name: Publish Docker images (multi)
 
@@ -22,15 +22,46 @@ on:
     types: [published]
 
 jobs:
-  push_orchestrator:
+  publish_images:
     if: github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]'
-    name: Push automation-orchestrator Docker image to Docker Hub
+    name: Push ${{ matrix.image_suffix }} Docker image to Docker Hub
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_suffix: automation-orchestrator
+            context: ./automation-orchestrator
+            dockerfile: ./automation-orchestrator/Dockerfile
+            pass_lib_token: false
+
+          - image_suffix: datalakehouse-api
+            context: ./datalakehouse-api
+            dockerfile: ./datalakehouse-api/Dockerfile
+            pass_lib_token: false
+
+          - image_suffix: jupyterlab
+            context: ./JupyterHub
+            dockerfile: ./JupyterHub/Dockerfile
+            pass_lib_token: false
+
+          - image_suffix: unstructured-pipeline
+            context: ./unstructured-pipeline
+            dockerfile: ./unstructured-pipeline/Dockerfile
+            pass_lib_token: true
+
+          - image_suffix: nifi
+            context: ./nifi
+            dockerfile: ./nifi/Dockerfile
+            pass_lib_token: false
+
     permissions:
       packages: write
       contents: read
       attestations: write
       id-token: write
+
     steps:
       - name: Check out the repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -43,36 +74,19 @@ jobs:
 
       - name: Set ENV variables
         run: |
-          echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
+          REPO_NAME="${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}"
+          IMAGE_NAME="${REPO_NAME}-${{ matrix.image_suffix }}"
+          IMAGE_REPOSITORY="tazamaorg/${IMAGE_NAME}"
+          IMAGE_URL="https://hub.docker.com/r/${IMAGE_REPOSITORY}"
+
+          echo "REPO_NAME=${REPO_NAME}" >> "$GITHUB_ENV"
+          echo "IMAGE_NAME=${IMAGE_NAME}" >> "$GITHUB_ENV"
+          echo "IMAGE_REPOSITORY=${IMAGE_REPOSITORY}" >> "$GITHUB_ENV"
+          echo "IMAGE_URL=${IMAGE_URL}" >> "$GITHUB_ENV"
 
       - name: Get package version
         id: pkg_version
-        run: echo "VERSION=$(node -p "require('./unstructured-pipeline/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf
-        with:
-          images: tazamaorg/${{ env.REPO_NAME }}-automation-orchestrator
-          tags: |
-            type=raw,value=${{ steps.pkg_version.outputs.VERSION }}
-
-      - name: Build and push automation-orchestrator Docker image
-        id: push
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294
-        with:
-          context: ./automation-orchestrator
-          file: ./automation-orchestrator/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
-        with:
-          subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-automation-orchestrator
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
+        run: echo "VERSION=$(node -p "require('./unstructured-pipeline/package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Resolve source PR
         id: src_pr
@@ -80,306 +94,72 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          PR_URL=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].html_url // empty' 2>/dev/null || true)
-          PR_FIELD=""
-          if [ -n "$PR_URL" ]; then
-            PR_FIELD=$(printf ',{"type": "mrkdwn","text": "*Source PR:*\\n<%s>"}' "$PR_URL")
-          fi
-          echo "PR_FIELD=${PR_FIELD}" >> "$GITHUB_OUTPUT"
+          PR_URL=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq '.[0].html_url // empty' 2>/dev/null || true)
 
-      - name: Send Slack Notification
-        continue-on-error: true
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          curl --fail -sS -X POST -H 'Content-type: application/json' --data '{"blocks": [{"type": "header","text": {"type": "plain_text","text": "New Dockerhub Image published :ship::ship:","emoji": true}},{"type": "section","fields": [{"type": "mrkdwn","text": "*Service:*\n${{ env.REPO_NAME }}-automation-orchestrator "},{"type": "mrkdwn","text": "*Tazama Dockerhub:*\n<https://hub.docker.com/r/tazamaorg/${{ env.REPO_NAME }}-automation-orchestrator>"}${{ steps.src_pr.outputs.PR_FIELD }}]}]}' $SLACK_WEBHOOK_URL
+          echo "PR_URL=${PR_URL}" >> "$GITHUB_OUTPUT"
 
-  push_datalakehouse:
-    if: github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]'
-    name: Push datalakehouse-api Docker image to Docker Hub
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-      attestations: write
-      id-token: write
-    steps:
-      - name: Check out the repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Set ENV variables
-        run: |
-          echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
-
-      - name: Get package version
-        id: pkg_version
-        run: echo "VERSION=$(node -p "require('./unstructured-pipeline/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Extract metadata (tags, labels) for Docker
+      - name: Extract metadata tags and labels for Docker
         id: meta
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf
         with:
-          images: tazamaorg/${{ env.REPO_NAME }}-datalakehouse-api
+          images: ${{ env.IMAGE_REPOSITORY }}
           tags: |
             type=raw,value=${{ steps.pkg_version.outputs.VERSION }}
 
-      - name: Build and push datalakehouse-api Docker image
-        id: push
+      - name: Build and push ${{ matrix.image_suffix }} Docker image (with lib token)
+        if: matrix.pass_lib_token
+        id: push_lib
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294
         with:
-          context: ./datalakehouse-api
-          file: ./datalakehouse-api/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
-        with:
-          subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-datalakehouse-api
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-
-      - name: Resolve source PR
-        id: src_pr
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PR_URL=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].html_url // empty' 2>/dev/null || true)
-          PR_FIELD=""
-          if [ -n "$PR_URL" ]; then
-            PR_FIELD=$(printf ',{"type": "mrkdwn","text": "*Source PR:*\\n<%s>"}' "$PR_URL")
-          fi
-          echo "PR_FIELD=${PR_FIELD}" >> "$GITHUB_OUTPUT"
-
-      - name: Send Slack Notification
-        continue-on-error: true
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          curl --fail -sS -X POST -H 'Content-type: application/json' --data '{"blocks": [{"type": "header","text": {"type": "plain_text","text": "New Dockerhub Image published :ship::ship:","emoji": true}},{"type": "section","fields": [{"type": "mrkdwn","text": "*Service:*\n${{ env.REPO_NAME }}-datalakehouse-api "},{"type": "mrkdwn","text": "*Tazama Dockerhub:*\n<https://hub.docker.com/r/tazamaorg/${{ env.REPO_NAME }}-datalakehouse-api>"}${{ steps.src_pr.outputs.PR_FIELD }}]}]}' $SLACK_WEBHOOK_URL
-
-  push_jupyterlab:
-    if: github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]'
-    name: Push jupyterlab Docker image to Docker Hub
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-      attestations: write
-      id-token: write
-    steps:
-      - name: Check out the repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Set ENV variables
-        run: |
-          echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
-
-      - name: Get package version
-        id: pkg_version
-        run: echo "VERSION=$(node -p "require('./unstructured-pipeline/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf
-        with:
-          images: tazamaorg/${{ env.REPO_NAME }}-jupyterlab
-          tags: |
-            type=raw,value=${{ steps.pkg_version.outputs.VERSION }}
-
-      - name: Build and push jupyterlab Docker image
-        id: push
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294
-        with:
-          context: ./JupyterHub
-          file: ./JupyterHub/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
-        with:
-          subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-jupyterlab
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-
-      - name: Resolve source PR
-        id: src_pr
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PR_URL=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].html_url // empty' 2>/dev/null || true)
-          PR_FIELD=""
-          if [ -n "$PR_URL" ]; then
-            PR_FIELD=$(printf ',{"type": "mrkdwn","text": "*Source PR:*\\n<%s>"}' "$PR_URL")
-          fi
-          echo "PR_FIELD=${PR_FIELD}" >> "$GITHUB_OUTPUT"
-
-      - name: Send Slack Notification
-        continue-on-error: true
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          curl --fail -sS -X POST -H 'Content-type: application/json' --data '{"blocks": [{"type": "header","text": {"type": "plain_text","text": "New Dockerhub Image published :ship::ship:","emoji": true}},{"type": "section","fields": [{"type": "mrkdwn","text": "*Service:*\n${{ env.REPO_NAME }}-jupyterlab "},{"type": "mrkdwn","text": "*Tazama Dockerhub:*\n<https://hub.docker.com/r/tazamaorg/${{ env.REPO_NAME }}-jupyterlab>"}${{ steps.src_pr.outputs.PR_FIELD }}]}]}' $SLACK_WEBHOOK_URL
-
-  push_unstructured:
-    if: github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]'
-    name: Push unstructured-pipeline Docker image to Docker Hub
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-      attestations: write
-      id-token: write
-    steps:
-      - name: Check out the repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Set ENV variables
-        run: |
-          echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
-
-      - name: Get package version
-        id: pkg_version
-        run: echo "VERSION=$(node -p "require('./unstructured-pipeline/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf
-        with:
-          images: tazamaorg/${{ env.REPO_NAME }}-unstructured-pipeline
-          tags: |
-            type=raw,value=${{ steps.pkg_version.outputs.VERSION }}
-
-      - name: Build and push unstructured-pipeline Docker image
-        id: push
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294
-        with:
-          context: ./unstructured-pipeline
-          file: ./unstructured-pipeline/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           secrets: |
             GH_TOKEN=${{ secrets.GH_TOKEN_LIB }}
 
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
-        with:
-          subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-unstructured-pipeline
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-
-      - name: Resolve source PR
-        id: src_pr
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PR_URL=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].html_url // empty' 2>/dev/null || true)
-          PR_FIELD=""
-          if [ -n "$PR_URL" ]; then
-            PR_FIELD=$(printf ',{"type": "mrkdwn","text": "*Source PR:*\\n<%s>"}' "$PR_URL")
-          fi
-          echo "PR_FIELD=${PR_FIELD}" >> "$GITHUB_OUTPUT"
-
-      - name: Send Slack Notification
-        continue-on-error: true
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          curl --fail -sS -X POST -H 'Content-type: application/json' --data '{"blocks": [{"type": "header","text": {"type": "plain_text","text": "New Dockerhub Image published :ship::ship:","emoji": true}},{"type": "section","fields": [{"type": "mrkdwn","text": "*Service:*\n${{ env.REPO_NAME }}-unstructured-pipeline "},{"type": "mrkdwn","text": "*Tazama Dockerhub:*\n<https://hub.docker.com/r/tazamaorg/${{ env.REPO_NAME }}-unstructured-pipeline>"}${{ steps.src_pr.outputs.PR_FIELD }}]}]}' $SLACK_WEBHOOK_URL
-
-  push_nifi:
-    if: github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]'
-    name: Push nifi Docker image to Docker Hub
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-      attestations: write
-      id-token: write
-    steps:
-      - name: Check out the repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Set ENV variables
-        run: |
-          echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
-
-      - name: Get package version
-        id: pkg_version
-        run: echo "VERSION=$(node -p "require('./unstructured-pipeline/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf
-        with:
-          images: tazamaorg/${{ env.REPO_NAME }}-nifi
-          tags: |
-            type=raw,value=${{ steps.pkg_version.outputs.VERSION }}
-
-      - name: Build and push nifi Docker image
+      - name: Build and push ${{ matrix.image_suffix }} Docker image
+        if: ${{ !matrix.pass_lib_token }}
         id: push
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294
         with:
-          context: ./nifi
-          file: ./nifi/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      - name: Resolve image digest
+        id: digest
+        run: |
+          DIGEST="${{ steps.push_lib.outputs.digest }}${{ steps.push.outputs.digest }}"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
       - name: Generate artifact attestation
+        if: success()
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
-          subject-name: docker.io/tazamaorg/${{ env.REPO_NAME }}-nifi
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-name: docker.io/${{ env.IMAGE_REPOSITORY }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
 
-      - name: Resolve source PR
-        id: src_pr
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PR_URL=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].html_url // empty' 2>/dev/null || true)
-          PR_FIELD=""
-          if [ -n "$PR_URL" ]; then
-            PR_FIELD=$(printf ',{"type": "mrkdwn","text": "*Source PR:*\\n<%s>"}' "$PR_URL")
-          fi
-          echo "PR_FIELD=${PR_FIELD}" >> "$GITHUB_OUTPUT"
-
       - name: Send Slack Notification
+        if: always()
         continue-on-error: true
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SERVICE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
+          IMAGE_TAG: ${{ steps.pkg_version.outputs.VERSION }}
+          IMAGE_URL: ${{ env.IMAGE_URL }}
+          PR_URL: ${{ steps.src_pr.outputs.PR_URL }}
+          JOB_STATUS: ${{ job.status }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          curl --fail -sS -X POST -H 'Content-type: application/json' --data '{"blocks": [{"type": "header","text": {"type": "plain_text","text": "New Dockerhub Image published :ship::ship:","emoji": true}},{"type": "section","fields": [{"type": "mrkdwn","text": "*Service:*\n${{ env.REPO_NAME }}-nifi "},{"type": "mrkdwn","text": "*Tazama Dockerhub:*\n<https://hub.docker.com/r/tazamaorg/${{ env.REPO_NAME }}-nifi>"}${{ steps.src_pr.outputs.PR_FIELD }}]}]}' $SLACK_WEBHOOK_URL
+          [ -z "$SLACK_WEBHOOK_URL" ] && echo "SLACK_WEBHOOK_URL is not configured. Skipping Slack notification." && exit 0
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          curl --fail-with-body -sS -X POST -H 'Content-type: application/json' --data "$(jq -n --arg title "$([ "$JOB_STATUS" = "success" ] && echo "DockerHub image published :ship:" || echo "DockerHub image build failed :x:")" --arg service "$SERVICE_NAME" --arg status "$JOB_STATUS" --arg image "${IMAGE_REPOSITORY}:${IMAGE_TAG}" --arg image_url "$IMAGE_URL" --arg branch "$BRANCH_NAME" --arg sha "$SHORT_SHA" --arg pr "$PR_URL" --arg run "$RUN_URL" '{blocks:[{type:"header",text:{type:"plain_text",text:$title,emoji:true}},{type:"section",fields:([{type:"mrkdwn",text:("*Service:*\n"+$service)},{type:"mrkdwn",text:("*Status:*\n"+$status)},{type:"mrkdwn",text:("*Image:*\n`"+$image+"`")},{type:"mrkdwn",text:("*Branch:*\n`"+$branch+"`")},{type:"mrkdwn",text:("*Commit:*\n`"+$sha+"`")},{type:"mrkdwn",text:("*DockerHub:*\n<"+$image_url+"|Open image>")},{type:"mrkdwn",text:("*Workflow Run:*\n<"+$run+"|Open run>")}]+(if $pr != "" then [{type:"mrkdwn",text:("*Source PR:*\n<"+$pr+"|Open PR>")}] else [] end))}]}')" "$SLACK_WEBHOOK_URL"
