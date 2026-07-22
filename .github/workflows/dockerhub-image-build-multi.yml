@@ -41,7 +41,7 @@ jobs:
             dockerfile: ./datalakehouse-api/Dockerfile
             pass_lib_token: false
 
-          - image_suffix: jupyterlab
+          - image_suffix: jupyterhub
             context: ./JupyterHub
             dockerfile: ./JupyterHub/Dockerfile
             pass_lib_token: false
