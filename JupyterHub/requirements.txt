@@ -1,0 +1,15 @@
+jupyterlab
+jupyterhub
+jupyterhub-nativeauthenticator
+pyspark==3.4.2
+findspark
+pandas
+numpy 
+plotly
+matplotlib
+seaborn
+ipywidgets
+scikit-learn>=1.3
+xgboost
+shap
+umap-learn
