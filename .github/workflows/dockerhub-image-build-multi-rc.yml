@@ -112,6 +112,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image_suffix }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.image_suffix }}
           secrets: |
             GH_TOKEN=${{ secrets.GH_TOKEN_LIB }}
 
@@ -125,6 +127,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image_suffix }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.image_suffix }}
 
       - name: Resolve image digest
         id: digest
