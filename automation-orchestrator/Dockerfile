@@ -25,7 +25,8 @@ ARG HADOOP_AWS_VERSION=3.3.4
 ARG AWS_SDK_BUNDLE_VERSION=1.12.262
 
 RUN mkdir -p /opt /opt/jars && \
-    curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}.tgz" -o /tmp/spark.tgz && \
+    { curl -fsSL "https://dlcdn.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}.tgz" -o /tmp/spark.tgz || \
+      curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}.tgz" -o /tmp/spark.tgz; } && \
     tar -xzf /tmp/spark.tgz -C /opt && \
     mv "/opt/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}" /opt/spark && \
     rm -f /tmp/spark.tgz
