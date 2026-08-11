@@ -200,6 +200,22 @@ jobs:
           docker rmi "${IMAGE}:${VERSION}" "${IMAGE}:rc"
           echo "RC image pushed: ${IMAGE}:${VERSION} and ${IMAGE}:rc"
 
+<<<<<<< HEAD
+=======
+      - name: Resolve source PR
+        id: src_pr
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_URL=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].html_url // empty' 2>/dev/null || true)
+          PR_FIELD=""
+          if [ -n "$PR_URL" ]; then
+            PR_FIELD=$(printf ',{"type": "mrkdwn","text": "*Source PR:*\\n<%s>"}' "$PR_URL")
+          fi
+          echo "PR_FIELD=${PR_FIELD}" >> "$GITHUB_OUTPUT"
+
+>>>>>>> fa8d362d628053987c600b8503ce124a68bd4ac4
       - name: Send Slack notification
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -227,8 +243,13 @@ jobs:
                   },
                   {
                     "type": "mrkdwn",
+<<<<<<< HEAD
                     "text": "*DockerHub:*\n<https://hub.docker.com/orgs/tazamaorg/repositories>"
                   }
+=======
+                    "text": "*DockerHub:*\n<https://hub.docker.com/r/tazamaorg/rule-${{ inputs.rule_number }}>"
+                  }${{ steps.src_pr.outputs.PR_FIELD }}
+>>>>>>> fa8d362d628053987c600b8503ce124a68bd4ac4
                 ]
               }
             ]

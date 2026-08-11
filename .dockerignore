@@ -1,0 +1,23 @@
+# .dockerignore - Patterns to exclude from Docker build
+node_modules
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.log
+.git/
+.gitignore
+.vscode/
+.idea/
+*.md
+!README.md
+.DS_Store
+*.swp
+*.swo
+*~
+# Exclude the local Spark distribution (use PySpark from pip instead)
+spark-3.4.2-bin-hadoop3/
