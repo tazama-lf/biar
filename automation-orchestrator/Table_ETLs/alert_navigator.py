@@ -103,6 +103,27 @@ class AlertNavigatorETL(BaseETL):
                 F.col("alert_data_obj.evaluationID").alias("evaluation_id"),
                 F.col("alert_data_obj.status").alias("alert_status"),
                 F.col("created_at_ts").cast("timestamp").alias("ingested_at_ts"),
+                F.expr("""
+                    element_at(
+                        flatten(
+                            transform(
+                                filter(
+                                    alert_data_obj.tadpResult.typologyResult,
+                                    t -> t is not null
+                                ),
+                                t -> transform(
+                                    filter(
+                                        t.ruleResults,
+                                        r -> r is not null
+                                            AND r.id RLIKE '^EFRuP@[0-9]+\\.[0-9]+\\.[0-9]+$'
+                                    ),
+                                    r -> r.subRuleRef
+                                )
+                            )
+                        ),
+                        1
+                    )
+                """).alias("block_or_override_status"),
             )
             .withColumn("pk", F.col("alert_id").cast("string"))
         )
@@ -152,18 +173,6 @@ class AlertNavigatorETL(BaseETL):
                 .withColumn(
                     "transaction_currency",
                     F.coalesce(F.col("msg_tx_ccy"), F.col("e2e_tx_ccy")),
-                )
-                .withColumn(
-                    "block_or_override_status",
-                    F.when(
-                        # F.col("transaction_status").isin("BLOCKED", "REJECTED"),
-                        # F.lit("BLOCKED_OR_REJECTED"),
-                    )
-                    .when(
-                        F.col("transaction_status").isNotNull(),
-                        F.lit("NOT_BLOCKED"),
-                    )
-                    .otherwise(F.lit(None)),
                 )
                 .drop(
                     "_payment_bridge_e2e",
