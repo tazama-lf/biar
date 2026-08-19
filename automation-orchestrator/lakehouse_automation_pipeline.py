@@ -21,6 +21,7 @@ from Table_ETLs.TransactionsETL import TransactionsETL
 from Table_ETLs.CommentsETL import CommentsETL
 from Table_ETLs.EntityETL import EntityETL
 from Table_ETLs.EvaluationETL import EvaluationETL
+from Table_ETLs.metrics_tms_etl import MetricsTMSETL
 from Table_ETLs.cms_usernames import CmsUsernamesETL
 from Table_ETLs.DynamicETL import DynamicETL
 from Table_ETLs.CasePriorityThresholdsETL import CasePriorityThresholdsETL
@@ -90,7 +91,12 @@ class FullETLOrchestrator:
         "sla_policy": SlaPoliciesETL,
         "investigation_groups": InvestigationGroupsETL,
         "investigation_group": InvestigationGroupsETL,
+        "metrics_tms": MetricsTMSETL,
+        "metrics": MetricsTMSETL,
     }
+
+    # Tables with no Ozone/S3A source file — they aggregate other gold tables directly.
+    _AGGREGATION_ONLY_TABLES: set[str] = {"metrics_tms", "metrics"}
 
     def __init__(
         self,
@@ -127,8 +133,13 @@ class FullETLOrchestrator:
         )
 
         print("* Starting Full Tazama Hudi ETL Pipeline...")
-        print(f"Bucket: {bucket}, Table: {table}, Object Key: {object_key}")
-        print(f"Source Path: {source_path}")
+        if table in self._AGGREGATION_ONLY_TABLES:
+            # No Ozone/S3A source file for these — they aggregate other gold
+            # tables directly, so bucket/object_key/source_path are meaningless.
+            print(f"Table: {table} (aggregation-only — no source file)")
+        else:
+            print(f"Bucket: {bucket}, Table: {table}, Object Key: {object_key}")
+            print(f"Source Path: {source_path}")
 
         # 1. Run domain table ETL
         etl_result = self._route_etl(table, source_path, db_name=db_name)
