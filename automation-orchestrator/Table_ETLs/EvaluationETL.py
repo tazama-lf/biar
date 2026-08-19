@@ -184,16 +184,16 @@ class EvaluationETL(BaseETL):
                 "dc_to_report_ms",
                 F.when(
                     F.col("event_ts").isNotNull() & F.col("dc_cre_dt_tm").isNotNull(),
-                    (F.col("event_ts").cast("long") - F.col("dc_cre_dt_tm").cast("long")) * 1000,
-                ).otherwise(F.lit(None).cast("long")),
+                    (F.col("event_ts").cast("double") - F.col("dc_cre_dt_tm").cast("double")) * 1000.0,
+                ).otherwise(F.lit(None).cast("double")),
             )
             # Latency: report event ts vs ingest time
             .withColumn(
                 "event_to_ingest_ms",
                 F.when(
                     F.col("event_ts").isNotNull(),
-                    (F.col("ingested_at_ts").cast("long") - F.col("event_ts").cast("long")) * 1000,
-                ).otherwise(F.lit(None).cast("long")),
+                    (F.col("ingested_at_ts").cast("double") - F.col("event_ts").cast("double")) * 1000.0,
+                ).otherwise(F.lit(None).cast("double")),
             )
             # Total processing time across all pipeline components
             .withColumn(
