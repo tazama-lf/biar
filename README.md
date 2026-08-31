@@ -61,6 +61,8 @@ The platform consists of the following components:
    - NiFi: [http://localhost:8088](http://localhost:8088)
    - Datalakehouse API: [http://localhost:8282](http://localhost:8282)
    - Automation Orchestrator API: [http://localhost:7619](http://localhost:7619)
+     Additional ETLs
+   - `automation-orchestrator/Table_ETLs/metrics_tms_etl.py`: Pre-aggregates TMS metrics and writes to `gold/metrics/tms` (Hudi). The dashboard prefers this pre-aggregated table when available.
    - Solr Admin: [http://localhost:8983](http://localhost:8983)
    - Ozone Recon: [http://localhost:9888](http://localhost:9888)
 

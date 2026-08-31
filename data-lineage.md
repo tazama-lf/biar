@@ -640,3 +640,12 @@ All tables use `COPY_ON_WRITE` table type with `BLOOM` index (except Gold `trans
 | `transaction` feed is bypassed in current mode | `event_history.transaction` | The Ozone transaction files are only consumed in legacy `"join"` mode. Current default is `"from_pacs"`, meaning `credttm` and `txtp` from `event_history.transaction` are unused. |
 | No DQ / DLQ for `account`, `account_holder`, `transactions` | `account`, `account_holder`, `transaction` | Only `alerts` has a full DQ framework with reason codes and a DLQ path (`silver/alerts_dlq`). |
 | No metrics layer for reference tables | `account`, `account_holder` | Reference tables do not feed into the `metrics/` layer. |
+
+### New: TMS Metrics ETL
+
+A new ETL was added to compute and persist TMS metrics into `gold/metrics/tms`.
+See `automation-orchestrator/Table_ETLs/metrics_tms_etl.py`. The ETL reads
+`gold/transactions` and `gold/evaluation`, computes the BIAR Section 2.1 metrics
+(transactions received, transactions evaluated, received vs evaluated rate, evaluation latency)
+and writes them to Hudi partitioned by `metric_year/metric_month/metric_date`.
+Dashboards should prefer this pre-aggregated table.

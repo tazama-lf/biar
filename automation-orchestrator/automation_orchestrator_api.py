@@ -191,9 +191,16 @@ def health():
 # VIEW BUILD  (triggered after queue drains)
 # ===================================================================
 
+# gold/metrics/tms has no NiFi-fed source file to trigger off of — it aggregates
+# gold/transactions and gold/evaluation. Refresh it right after either of those
+# tables completes in a batch, rather than on a fixed timer.
+METRICS_TMS_DEPENDENCY_TABLES = {"transaction", "transactions", "evaluation"}
+
+
 def maybe_run_views_after_full_pipeline() -> None:
     """
-    Build views once the entire job queue has drained successfully.
+    Build views once the entire job queue has drained successfully, then
+    refresh gold/metrics/tms if one of its dependency tables just completed.
 
     Logic is identical to the original API:
       1. Skip if a view build is already running.
@@ -211,11 +218,16 @@ def maybe_run_views_after_full_pipeline() -> None:
         if not COMPLETED_TABLES:
             return
         VIEW_BUILD_IN_PROGRESS = True
+        completed_this_batch = set(COMPLETED_TABLES)
 
     try:
         spark = GLOBAL_SPARK if GLOBAL_SPARK else get_spark_session()
         # Replaced: run_all_views(spark, DEFAULT_WAREHOUSE_ROOT)
         ViewsOrchestrator(spark, DEFAULT_WAREHOUSE_ROOT).run()
+
+        if completed_this_batch & METRICS_TMS_DEPENDENCY_TABLES:
+            print("[METRICS-REFRESH] transactions/evaluation updated — refreshing gold/metrics/tms")
+            FullETLOrchestrator(spark, DEFAULT_WAREHOUSE_ROOT).run(table="metrics_tms", bucket="")
     except Exception:
         print("[VIEWS ERROR] Failed to build views")
         traceback.print_exc()

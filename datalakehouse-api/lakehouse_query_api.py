@@ -149,6 +149,7 @@ typologies_gold_path     = f"{WAREHOUSE_ROOT}/gold/typologies"
 rules_bronze_path         = f"{WAREHOUSE_ROOT}/bronze/rule"
 typologies_bronze_path         = f"{WAREHOUSE_ROOT}/bronze/typologies"
 alerts_bronze_path         = f"{WAREHOUSE_ROOT}/bronze/alerts"
+metrics_tms_gold_path     = f"{WAREHOUSE_ROOT}/gold/metrics/tms"
 
 VIEWS_ROOT                            = f"{WAREHOUSE_ROOT}/views"
 ALERT_NAV_ROOT                        = f"{VIEWS_ROOT}/alert_navigator"
@@ -188,7 +189,7 @@ GOLD_PATHS = {
     "alerts_bronze":                   alerts_bronze_path,
     "rules_bronze":                    rules_bronze_path,
     "typologies_bronze":               typologies_bronze_path,
-    
+    "metrics_tms":                     metrics_tms_gold_path,
 }
 
 # ---------------------------
