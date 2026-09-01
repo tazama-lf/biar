@@ -17,7 +17,9 @@ import findspark
 import time
 import logging
 import re
-import jwt
+from jwt import InvalidTokenError
+
+from auth import verify_token
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pipeline")
@@ -229,28 +231,10 @@ _sql_lock = threading.Lock()   # serialises temp-view registration + SQL executi
 # JWT Authentication
 # ============================================================
 
-# This service sits behind an API gateway (e.g. Kong / Nginx + Keycloak) that
-# performs signature verification upstream before the request reaches here.
-# This service only extracts claims for tenant isolation and RBAC.
-_REQUIRED_CLAIM = "QUERY_LAKEHOUSE"
+# Tokens are issued by Tazama's auth-service (RS256, signed with a private key
+# that pairs with CERT_PATH_PUBLIC below). Verification is local and offline —
+# see docs/auth/00-overview.md and docs/auth/01-issue-161-gap.md.
 _http_bearer = HTTPBearer(auto_error=False)
-
-
-def _extract_all_claims(payload: dict) -> List[str]:
-    claims: List[str] = []
-
-    realm_roles = payload.get("realm_access", {}).get("roles", [])
-    claims.extend(realm_roles)
-
-    for client_access in payload.get("resource_access", {}).values():
-        claims.extend(client_access.get("roles", []))
-
-    # Support wrapped tokens with flat claims array
-    flat_claims = payload.get("claims", [])
-    if isinstance(flat_claims, list):
-        claims.extend(flat_claims)
-
-    return list(set(claims))
 
 
 def verify_jwt(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_http_bearer)) -> dict:
@@ -261,55 +245,22 @@ def verify_jwt(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_ht
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = credentials.credentials
-
     try:
-        payload = jwt.decode(
-            token,
-            algorithms=["RS256", "HS256"],
-            options={"verify_signature": False, "verify_exp": False},
+        result = verify_token(credentials.credentials)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"status": "error", "code": 403, "message": str(exc)},
         )
-    except jwt.InvalidTokenError as exc:
+    except InvalidTokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"status": "error", "code": 401, "message": f"Invalid token: {exc}"},
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Enforce expiry when the claim is present
-    exp = payload.get("exp")
-    if exp is not None and time.time() > exp:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"status": "error", "code": 401, "message": "Token has expired"},
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    all_claims = _extract_all_claims(payload)
-    if _REQUIRED_CLAIM not in all_claims:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "status": "error",
-                "code": 403,
-                "message": f"Token is missing required claim: '{_REQUIRED_CLAIM}'",
-            },
-        )
-
-    tenant_id = payload.get("tenant_id") or payload.get("tenantId")
-    if not tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"status": "error", "code": 403, "message": "Token is missing 'tenant_id' or 'tenantId' claim"},
-        )
-
-    logger.info(f"JWT claims extracted — tenant_id={tenant_id}, claims={all_claims}")
-
-    return {
-        "tenant_id": tenant_id,
-        "claims": all_claims,
-        "payload": payload,
-    }
+    logger.info(f"JWT verified — tenant_id={result['tenant_id']}, claims={result['claims']}")
+    return result
 
 # ============================================================
 # Helpers

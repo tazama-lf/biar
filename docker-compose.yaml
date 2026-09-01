@@ -217,10 +217,12 @@ services:
       - .env
     environment:
       WAREHOUSE_ROOT: /opt/Tazama_Warehouse
+      CERT_PATH_PUBLIC: /run/secrets/tazama-public-key.pem
     ports:
       - 8282:8282
     volumes:
       - ${TAZAMA_WAREHOUSE_HOST_PATH}:/opt/Tazama_Warehouse
+      - ${TAZAMA_AUTH_PUBLIC_KEY_HOST_PATH}:/run/secrets/tazama-public-key.pem:ro
     depends_on:
       - s3g
 

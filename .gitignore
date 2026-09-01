@@ -2,3 +2,6 @@ Tazama_Hudi_warehouse/
 logs/
 lib/
 .env
+secrets/
+__pycache__/
+.pytest_cache/
