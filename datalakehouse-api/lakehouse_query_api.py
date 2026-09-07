@@ -19,7 +19,7 @@ import logging
 import re
 from jwt import InvalidTokenError
 
-from auth import verify_token
+from auth import get_public_key_status, verify_token
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pipeline")
@@ -463,6 +463,14 @@ async def health_check():
     # 3. At least one gold table directory exists
     gold_dirs_found = [t for t, p in GOLD_PATHS.items() if os.path.isdir(p)]
     checks["gold_tables_found"] = len(gold_dirs_found)
+
+    # 4. JWT verification key loaded (lazy-loaded on first verify_jwt call —
+    # this surfaces a misconfigured CERT_PATH_PUBLIC here instead of only as
+    # 401s on the protected routes; see docs/auth/00-overview.md).
+    key_status = get_public_key_status()
+    checks["auth_key"] = key_status
+    if not key_status["loaded"]:
+        overall_ok = False
 
     if not overall_ok:
         return JSONResponse(

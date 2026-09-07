@@ -8,18 +8,22 @@ on Keycloak or auth-service being reachable at request time. See
 docs/auth/01-issue-161-gap.md for why this is the pattern to follow instead
 of live JWKS verification against Keycloak.
 """
-import os
 import logging
-from typing import Any, Dict, List
+import os
+import threading
+from typing import Any, Optional
 
 import jwt
-from jwt import InvalidTokenError
 
 logger = logging.getLogger("auth")
 
 _REQUIRED_CLAIM = "QUERY_LAKEHOUSE"
 _ALGORITHMS = ["RS256"]
 _LEEWAY_SECONDS = 30
+
+_public_key: Optional[bytes] = None  # noqa: UP045 (repo runtime is Python 3.9, `X | None` needs 3.10+)
+_public_key_error: Optional[str] = None  # noqa: UP045
+_public_key_lock = threading.Lock()
 
 
 def _load_public_key() -> bytes:
@@ -37,26 +41,63 @@ def _load_public_key() -> bytes:
         raise RuntimeError(f"Could not read CERT_PATH_PUBLIC at '{path}': {exc}") from exc
 
 
-_public_key: bytes = _load_public_key()
+def _get_public_key() -> bytes:
+    """Load and cache the verification key on first use.
+
+    Deliberately lazy rather than loaded at import time: lakehouse_query_api.py
+    imports this module before constructing the FastAPI app, so a module-level
+    load would crash the whole process — including the unauthenticated
+    /health and /tables routes — on a misconfigured or not-yet-mounted key.
+    Loading on first verify_token() call keeps those routes reachable so an
+    operator can see what's wrong instead of a bare crash loop.
+    """
+    global _public_key, _public_key_error
+    if _public_key is not None:
+        return _public_key
+    with _public_key_lock:
+        if _public_key is not None:
+            return _public_key
+        try:
+            _public_key = _load_public_key()
+            _public_key_error = None
+        except RuntimeError as exc:
+            _public_key_error = str(exc)
+            raise
+        return _public_key
 
 
-def _extract_all_claims(payload: Dict[str, Any]) -> List[str]:
+def get_public_key_status() -> dict[str, Any]:
+    """Report whether the verification key is loaded, without raising.
+
+    For use by /health — surfaces a misconfigured CERT_PATH_PUBLIC as a
+    reported check rather than only as 401s on protected routes.
+    """
+    if _public_key is not None:
+        return {"loaded": True}
+    try:
+        _get_public_key()
+        return {"loaded": True}
+    except RuntimeError as exc:
+        return {"loaded": False, "error": str(exc)}
+
+
+def _extract_all_claims(payload: dict[str, Any]) -> list[str]:
     claims = payload.get("claims", [])
     if isinstance(claims, list):
         return list(claims)
     return []
 
 
-def verify_token(token: str) -> Dict[str, Any]:
+def verify_token(token: str) -> dict[str, Any]:
     """Verify a Tazama JWT's signature, expiry, and required claim.
 
-    Raises PermissionError if the required claim is absent, or an
-    InvalidTokenError subclass on any signature/expiry/format failure.
+    Raises PermissionError if the required claim or tenant id is absent, or
+    an InvalidTokenError subclass on any signature/expiry/format failure.
     Callers should map both to an HTTP error (403 and 401 respectively).
     """
     payload = jwt.decode(
         token,
-        _public_key,
+        _get_public_key(),
         algorithms=_ALGORITHMS,
         leeway=_LEEWAY_SECONDS,
         options={"require": ["exp"]},
@@ -68,7 +109,7 @@ def verify_token(token: str) -> Dict[str, Any]:
 
     tenant_id = payload.get("tenantId") or payload.get("tenant_id")
     if not tenant_id:
-        raise InvalidTokenError("Token is missing 'tenantId' claim")
+        raise PermissionError("Token is missing 'tenantId' or 'tenant_id' claim")
 
     return {
         "tenant_id": tenant_id,
