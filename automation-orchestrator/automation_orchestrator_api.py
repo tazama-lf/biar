@@ -20,7 +20,7 @@ from queue import Queue
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, status
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -128,6 +128,11 @@ OUTPUT_REQUEST = os.path.join(OUT_DIR, "last_request.json")
 
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "1"))
 
+# Bounds job_queue so an overloaded orchestrator can signal backpressure
+# (HTTP 503 from /checksubmit) instead of accepting a job it can't actually
+# guarantee will run — see submit() below.
+JOB_QUEUE_MAX_SIZE = int(os.getenv("JOB_QUEUE_MAX_SIZE", "1000"))
+
 # How often the view-refresh scheduler ticks. Views used to only rebuild
 # when job_queue drained to zero (see run_scheduled_view_refresh() below for
 # why that trigger has been replaced) — this interval is now the only thing
@@ -223,7 +228,7 @@ def _normalized_request(req: TriggerRequest) -> TriggerRequest:
 # SHARED STATE  (queue + view-build gate)
 # ===================================================================
 
-job_queue = Queue()
+job_queue = Queue(maxsize=JOB_QUEUE_MAX_SIZE)
 
 STATE_LOCK           = threading.Lock()
 STATE_COND           = threading.Condition(STATE_LOCK)
@@ -484,6 +489,7 @@ def submit(
 
     payload = {
         "raw_path":         normalized_req.raw_path,
+        "db_name":          normalized_req.db_name,
         "bucket":           normalized_req.bucket,
         "table":            normalized_req.table,
         "object_key":       normalized_req.object_key,
@@ -491,24 +497,47 @@ def submit(
     }
 
     # ------------------------------------------------------------------
-    # Always queue the ETL job (non-blocking)
+    # Queue the ETL job (non-blocking). put_nowait() actually validates the
+    # job was accepted — unlike a plain put() on an unbounded Queue, which
+    # can never fail, so the old try/except here never caught anything and
+    # the caller always got back 200 "queued" whether or not that was true.
+    # A full queue now surfaces as 503 so a caller (e.g. NiFi) that treats
+    # a non-2xx as "not accepted" won't advance past a job we never queued.
     # ------------------------------------------------------------------
     try:
-        job_queue.put(normalized_req)
-        print(
-            f"[QUEUE] Added job: {normalized_req.raw_path or normalized_req.object_key} "
-            f"| table={normalized_req.table} | Queue size: {job_queue.qsize()}"
+        job_queue.put_nowait(normalized_req)
+    except queue.Full:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "status_code": status.HTTP_503_SERVICE_UNAVAILABLE,
+                "status":      "error",
+                "message":     f"Job queue is full (max {JOB_QUEUE_MAX_SIZE}); try again later",
+            },
         )
-        return {
-            "status":   "queued",
-            "message":  "ETL job added to queue",
-            "raw_path": normalized_req.raw_path,
-            "bucket":   normalized_req.bucket,
-            "table":    normalized_req.table,
-            "data":     payload,
-        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "status_code": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "status":      "error",
+                "message":     str(e),
+            },
+        )
+
+    print(
+        f"[QUEUE] Added job: {normalized_req.raw_path or normalized_req.object_key} "
+        f"| table={normalized_req.table} | Queue size: {job_queue.qsize()}"
+    )
+    return {
+        "status_code": status.HTTP_200_OK,
+        "status":   "queued",
+        "message":  "ETL job added to queue",
+        "raw_path": normalized_req.raw_path,
+        "bucket":   normalized_req.bucket,
+        "table":    normalized_req.table,
+        "data":     payload,
+    }
         
 # ===================================================================
 # ENTRY POINT
