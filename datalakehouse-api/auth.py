@@ -14,6 +14,8 @@ import threading
 from typing import Any, Optional
 
 import jwt
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 logger = logging.getLogger("auth")
 
@@ -27,6 +29,13 @@ _public_key_lock = threading.Lock()
 
 
 def _load_public_key() -> bytes:
+    """Read, parse, and validate the configured RSA public key.
+
+    Parsing at load time (rather than trusting any readable file) ensures a
+    malformed or non-RSA key fails here — surfaced by get_public_key_status()
+    and /health — instead of passing jwt.decode()'s InvalidKeyError to every
+    request at verify_token() time.
+    """
     path = os.environ.get("CERT_PATH_PUBLIC")
     if not path:
         raise RuntimeError(
@@ -36,9 +45,22 @@ def _load_public_key() -> bytes:
         )
     try:
         with open(path, "rb") as f:
-            return f.read()
+            key_bytes = f.read()
     except OSError as exc:
         raise RuntimeError(f"Could not read CERT_PATH_PUBLIC at '{path}': {exc}") from exc
+
+    try:
+        key = load_pem_public_key(key_bytes)
+    except ValueError as exc:
+        raise RuntimeError(f"CERT_PATH_PUBLIC at '{path}' is not a valid PEM public key: {exc}") from exc
+
+    if not isinstance(key, RSAPublicKey):
+        raise RuntimeError(
+            f"CERT_PATH_PUBLIC at '{path}' is a {type(key).__name__}, not an RSA public key "
+            f"(algorithms={_ALGORITHMS} requires RSA)."
+        )
+
+    return key_bytes
 
 
 def _get_public_key() -> bytes:
