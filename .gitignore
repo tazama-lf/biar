@@ -5,3 +5,4 @@ lib/
 secrets/
 __pycache__/
 .pytest_cache/
+.venv

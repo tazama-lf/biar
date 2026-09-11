@@ -9,7 +9,7 @@ deployment key.
 
 Run with:
     cd datalakehouse-api
-    pip install -r requirements-test.txt
+    pip install -r requirements.txt
     pytest tests/ -v
 """
 import base64
