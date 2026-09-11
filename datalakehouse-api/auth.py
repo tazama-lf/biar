@@ -2,11 +2,12 @@
 """Local JWT verification for Tazama tokens issued by auth-service.
 
 Verifies the signature, expiry, and required claim of tokens signed by
-Tazama's auth-service (see docs/auth/00-overview.md). Verification is fully
-offline against a static RSA public key file — no JWKS fetch, no dependency
-on Keycloak or auth-service being reachable at request time. See
-docs/auth/01-issue-161-gap.md for why this is the pattern to follow instead
-of live JWKS verification against Keycloak.
+Tazama's auth-service. Verification is fully offline against a static RSA
+public key file — no JWKS fetch, no dependency on Keycloak or auth-service
+being reachable at request time. This mirrors the pattern every other Tazama
+service (CMS, TCS, admin-service) uses via auth-lib: verify the
+auth-service-issued token locally against a shared public key, rather than
+verifying a raw Keycloak token against a live JWKS endpoint.
 """
 import logging
 import os
@@ -40,8 +41,7 @@ def _load_public_key() -> bytes:
     if not path:
         raise RuntimeError(
             "CERT_PATH_PUBLIC is not set — BIAR cannot verify Tazama JWTs without it. "
-            "This must point at the same public key file auth-service signs with "
-            "(see docs/auth/03-deployment-notes.md)."
+            "This must point at the same public key file auth-service signs with."
         )
     try:
         with open(path, "rb") as f:
@@ -55,7 +55,7 @@ def _load_public_key() -> bytes:
         raise RuntimeError(f"CERT_PATH_PUBLIC at '{path}' is not a valid PEM public key: {exc}") from exc
 
     if not isinstance(key, RSAPublicKey):
-        raise RuntimeError(
+        raise RuntimeError(  # noqa: TRY004 -- must stay RuntimeError: caught by _get_public_key()/get_public_key_status() to report via /health instead of crashing.
             f"CERT_PATH_PUBLIC at '{path}' is a {type(key).__name__}, not an RSA public key "
             f"(algorithms={_ALGORITHMS} requires RSA)."
         )

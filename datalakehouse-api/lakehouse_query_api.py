@@ -233,7 +233,7 @@ _sql_lock = threading.Lock()   # serialises temp-view registration + SQL executi
 
 # Tokens are issued by Tazama's auth-service (RS256, signed with a private key
 # that pairs with CERT_PATH_PUBLIC below). Verification is local and offline —
-# see docs/auth/00-overview.md and docs/auth/01-issue-161-gap.md.
+# no JWKS fetch, no dependency on Keycloak/auth-service being reachable.
 _http_bearer = HTTPBearer(auto_error=False)
 
 
@@ -466,7 +466,7 @@ async def health_check():
 
     # 4. JWT verification key loaded (lazy-loaded on first verify_jwt call —
     # this surfaces a misconfigured CERT_PATH_PUBLIC here instead of only as
-    # 401s on the protected routes; see docs/auth/00-overview.md).
+    # 401s on the protected routes).
     key_status = get_public_key_status()
     checks["auth_key"] = key_status
     if not key_status["loaded"]:
