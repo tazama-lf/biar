@@ -5,3 +5,4 @@ findspark
 pydantic
 PyJWT==2.12.0
 cryptography==46.0.7
+pytest
