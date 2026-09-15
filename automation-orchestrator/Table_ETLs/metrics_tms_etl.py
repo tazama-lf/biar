@@ -214,7 +214,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_hour",
                     "metric_quarter",
                 ],
-                how="left",
+                how="full",
             )
             .fillna({
                 "transactions_received": 0,
