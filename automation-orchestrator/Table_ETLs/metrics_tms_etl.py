@@ -11,7 +11,10 @@ class MetricsTMSETL(BaseETL):
     """Pre-aggregate BIAR TMS metrics and persist to gold/metrics/tms as Hudi.
 
     Produces one combined metrics table partitioned by metric_year/metric_month/metric_date
-    and keyed by metric_year,metric_month,metric_date,metric_hour,metric_quarter,metric_granularity.
+    and keyed by metric_year,metric_month,metric_date,metric_hour,metric_quarter,
+    metric_granularity,tenant_id. Every row is scoped to a single tenant so the
+    lakehouse query API's tenant_id filter (and the notebooks' load_tenant_hudi()
+    helper) can enforce isolation on this table like every other gold table.
     """
 
     def __init__(self, spark: SparkSession, warehouse_root: str) -> None:
@@ -55,7 +58,7 @@ class MetricsTMSETL(BaseETL):
         received = (
             tx.filter(F.col("tx_type") == "pacs.008.001.10")
             .filter(F.col("event_ts").isNotNull())
-            .select("end_to_end_id", "event_ts")
+            .select("end_to_end_id", "event_ts", "tenant_id")
         )
 
         agg = (
@@ -70,6 +73,7 @@ class MetricsTMSETL(BaseETL):
                 "metric_date",
                 "metric_hour",
                 "metric_quarter",
+                "tenant_id",
             )
             .agg(F.countDistinct("end_to_end_id").alias("transactions_received"))
         )
@@ -96,7 +100,7 @@ class MetricsTMSETL(BaseETL):
         evaluated = (
             eval_df.filter(F.col("tx_msg_id").isNotNull())
             .filter(F.col("event_ts").isNotNull())
-            .select("tx_msg_id", "event_ts")
+            .select("tx_msg_id", "event_ts", "tenant_id")
             .withColumn("metric_date", F.to_date("event_ts"))
             .withColumn("metric_hour", F.hour("event_ts"))
             .withColumn("metric_month", F.month("event_ts"))
@@ -110,6 +114,7 @@ class MetricsTMSETL(BaseETL):
             "metric_date",
             "metric_hour",
             "metric_quarter",
+            "tenant_id",
         ).agg(F.countDistinct("tx_msg_id").alias("transactions_evaluated"))
 
         # Raw per-eval latency rows with both timestamps present
@@ -137,6 +142,7 @@ class MetricsTMSETL(BaseETL):
                 "metric_date",
                 "metric_hour",
                 "metric_quarter",
+                "tenant_id",
                 "e2e_eval_time_ms",
             )
         )
@@ -154,6 +160,7 @@ class MetricsTMSETL(BaseETL):
             "metric_date",
             "metric_hour",
             "metric_quarter",
+            "tenant_id",
         ).agg(
             F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
             F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -232,6 +239,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_date",
                     "metric_hour",
                     "metric_quarter",
+                    "tenant_id",
                 ],
                 how="full",
             )
@@ -243,6 +251,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_date",
                     "metric_hour",
                     "metric_quarter",
+                    "tenant_id",
                 ],
                 how="full",
             )
@@ -284,7 +293,7 @@ class MetricsTMSETL(BaseETL):
         # Daily rollups: counts by summing hourly counts, latency from raw rows
         daily_counts = (
             hourly.groupBy(
-                "metric_year", "metric_month", "metric_date", "metric_quarter"
+                "metric_year", "metric_month", "metric_date", "metric_quarter", "tenant_id"
             )
             .agg(
                 F.sum("transactions_received").alias("transactions_received"),
@@ -298,7 +307,7 @@ class MetricsTMSETL(BaseETL):
         daily_counts = self._with_rate(daily_counts)
 
         daily_latency = (
-            latency_valid.groupBy("metric_year", "metric_month", "metric_date")
+            latency_valid.groupBy("metric_year", "metric_month", "metric_date", "tenant_id")
             .agg(
                 F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
                 F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -308,12 +317,14 @@ class MetricsTMSETL(BaseETL):
         )
 
         daily = daily_counts.join(
-            daily_latency, on=["metric_year", "metric_month", "metric_date"], how="left"
+            daily_latency,
+            on=["metric_year", "metric_month", "metric_date", "tenant_id"],
+            how="left",
         ).withColumn("metric_quarter", F.quarter(F.col("metric_date")))
 
         # Monthly rollups
         monthly_counts = (
-            hourly.groupBy("metric_year", "metric_month", "metric_quarter")
+            hourly.groupBy("metric_year", "metric_month", "metric_quarter", "tenant_id")
             .agg(
                 F.sum("transactions_received").alias("transactions_received"),
                 F.sum("transactions_evaluated").alias("transactions_evaluated"),
@@ -327,7 +338,7 @@ class MetricsTMSETL(BaseETL):
         monthly_counts = self._with_rate(monthly_counts)
 
         monthly_latency = (
-            latency_valid.groupBy("metric_year", "metric_month")
+            latency_valid.groupBy("metric_year", "metric_month", "tenant_id")
             .agg(
                 F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
                 F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -337,12 +348,12 @@ class MetricsTMSETL(BaseETL):
         )
 
         monthly = monthly_counts.join(
-            monthly_latency, on=["metric_year", "metric_month"], how="left"
+            monthly_latency, on=["metric_year", "metric_month", "tenant_id"], how="left"
         )
 
         # Quarterly rollups
         quarterly_counts = (
-            hourly.groupBy("metric_year", "metric_quarter")
+            hourly.groupBy("metric_year", "metric_quarter", "tenant_id")
             .agg(
                 F.sum("transactions_received").alias("transactions_received"),
                 F.sum("transactions_evaluated").alias("transactions_evaluated"),
@@ -357,7 +368,7 @@ class MetricsTMSETL(BaseETL):
         quarterly_counts = self._with_rate(quarterly_counts)
 
         quarterly_latency = (
-            latency_valid.groupBy("metric_year", "metric_quarter")
+            latency_valid.groupBy("metric_year", "metric_quarter", "tenant_id")
             .agg(
                 F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
                 F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -367,12 +378,12 @@ class MetricsTMSETL(BaseETL):
         )
 
         quarterly = quarterly_counts.join(
-            quarterly_latency, on=["metric_year", "metric_quarter"], how="left"
+            quarterly_latency, on=["metric_year", "metric_quarter", "tenant_id"], how="left"
         )
 
         # Annual rollups
         annual_counts = (
-            hourly.groupBy("metric_year")
+            hourly.groupBy("metric_year", "tenant_id")
             .agg(
                 F.sum("transactions_received").alias("transactions_received"),
                 F.sum("transactions_evaluated").alias("transactions_evaluated"),
@@ -388,7 +399,7 @@ class MetricsTMSETL(BaseETL):
         annual_counts = self._with_rate(annual_counts)
 
         annual_latency = (
-            latency_valid.groupBy("metric_year")
+            latency_valid.groupBy("metric_year", "tenant_id")
             .agg(
                 F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
                 F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -397,7 +408,9 @@ class MetricsTMSETL(BaseETL):
             )
         )
 
-        annual = annual_counts.join(annual_latency, on=["metric_year"], how="left")
+        annual = annual_counts.join(
+            annual_latency, on=["metric_year", "tenant_id"], how="left"
+        )
 
         # Union all granularities
         all_frames = [hourly, daily, monthly, quarterly, annual]
@@ -410,6 +423,7 @@ class MetricsTMSETL(BaseETL):
 
         # Ensure canonical column order and presence
         expected_cols = [
+            "tenant_id",
             "metric_year",
             "metric_month",
             "metric_date",
@@ -426,6 +440,7 @@ class MetricsTMSETL(BaseETL):
         ]
 
         col_types = {
+            "tenant_id": "string",
             "metric_year": "int",
             "metric_month": "int",
             "metric_date": "date",
@@ -460,6 +475,7 @@ class MetricsTMSETL(BaseETL):
             pick("tx_type", "txtp").alias("tx_type"),
             pick("end_to_end_id", "endtoendid").alias("end_to_end_id"),
             pick("event_ts", cast_type="timestamp").alias("event_ts"),
+            pick("tenant_id", "tenantid").alias("tenant_id"),
         )
 
     def gold(self) -> str:
@@ -495,7 +511,7 @@ class MetricsTMSETL(BaseETL):
 
         # Hudi writer options
         # Use a composite record key that includes quarter and granularity to avoid collisions
-        record_key = "metric_year,metric_month,metric_date,metric_hour,metric_quarter,metric_granularity"
+        record_key = "metric_year,metric_month,metric_date,metric_hour,metric_quarter,metric_granularity,tenant_id"
         partition = "metric_year,metric_month,metric_date"
         opts = self.hudi_opts(
             table_name="metrics_tms",
@@ -505,7 +521,7 @@ class MetricsTMSETL(BaseETL):
         )
         # hudi_opts() defaults to SimpleKeyGenerator when a partition is set, but
         # SimpleKeyGenerator only supports a single record-key field. record_key here
-        # is a 6-field composite, so it needs ComplexKeyGenerator instead.
+        # is a 7-field composite, so it needs ComplexKeyGenerator instead.
         opts["hoodie.datasource.write.keygenerator.class"] = (
             "org.apache.hudi.keygen.ComplexKeyGenerator"
         )
