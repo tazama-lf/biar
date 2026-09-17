@@ -18,11 +18,13 @@ class MetricsTMSETL(BaseETL):
     """
 
     def __init__(self, spark: SparkSession, warehouse_root: str) -> None:
+        """Set the gold/metrics/tms output path under warehouse_root."""
         super().__init__(spark, warehouse_root)
         self.metrics_root = f"{self.warehouse_root}/gold/metrics/tms"
 
     @property
     def gold_path(self) -> str:
+        """Path to the gold/metrics/tms Hudi table."""
         return self.metrics_root
 
     def bronze(self, source_path: str) -> str:
@@ -34,8 +36,11 @@ class MetricsTMSETL(BaseETL):
         return self.metrics_root
 
     def run(self, source_path: str) -> str:
-        # source_path is a synthetic placeholder — this ETL has no source file,
-        # it reads gold/transactions and gold/evaluation directly.
+        """Run the full aggregation and write gold/metrics/tms.
+
+        source_path is a synthetic placeholder — this ETL has no source file,
+        it reads gold/transactions and gold/evaluation directly.
+        """
         print(
             f"[MetricsTMSETL] Aggregating from {self.warehouse_root}/gold/transactions "
             f"and {self.warehouse_root}/gold/evaluation"
@@ -45,6 +50,7 @@ class MetricsTMSETL(BaseETL):
         return result
 
     def _time_dims(self, ts_col: str) -> List[F.Column]:
+        """Derive metric_date/hour/month/quarter/year columns from a timestamp column."""
         return [
             F.to_date(F.col(ts_col)).alias("metric_date"),
             F.hour(F.col(ts_col)).alias("metric_hour"),
@@ -54,6 +60,7 @@ class MetricsTMSETL(BaseETL):
         ]
 
     def _aggregate_received(self, tx: DataFrame) -> DataFrame:
+        """Return hourly, per-tenant counts of received pacs.008 transactions."""
         # Filter pacs.008 and valid event_ts
         received = (
             tx.filter(F.col("tx_type") == "pacs.008.001.10")
@@ -392,6 +399,7 @@ class MetricsTMSETL(BaseETL):
         normalize_transactions_for_dashboard()."""
 
         def pick(*names, cast_type="string"):
+            """Return the first matching column among names, cast to cast_type, or a typed null."""
             for name in names:
                 if name in tx.columns:
                     return F.col(name).cast(cast_type)
@@ -405,6 +413,7 @@ class MetricsTMSETL(BaseETL):
         )
 
     def gold(self) -> str:
+        """Aggregate gold/transactions and gold/evaluation and write gold/metrics/tms."""
         # Read source gold tables
         tx_path = f"{self.warehouse_root}/gold/transactions"
         eval_path = f"{self.warehouse_root}/gold/evaluation"
