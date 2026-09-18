@@ -123,7 +123,7 @@ class AlertNavigatorETL(BaseETL):
                         ),
                         1
                     )
-                """).alias("block_or_override_status"),
+                """).alias("efrup_subruleref"),
             )
             .withColumn("pk", F.col("alert_id").cast("string"))
         )
