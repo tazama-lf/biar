@@ -191,18 +191,22 @@ COMPLETED_TABLES: set[str] = set()
 # in-memory only, so a job that's put() but not yet get()'d by a worker
 # disappears if the process restarts, while the caller already got a 200.
 #
-# JOB_JOURNAL_PATH is an append-only log of "queued"/"done"/"failed"
-# events. submit() below writes the "queued" event and waits for it to
-# land on disk *before* acking the request, and worker() writes the
-# terminal event once the job finishes. _recover_unfinished_jobs() is
-# called once at startup to replay the journal and re-enqueue anything
-# that was "queued" but never reached a terminal event — i.e. exactly the
-# jobs the issue describes as silently lost.
+# JOB_JOURNAL_PATH is an append-only log of "queued"/"running"/"done"/
+# "failed" events. submit() below writes the "queued" event and waits for
+# it to land on disk *before* acking the request; worker() writes "running"
+# when it picks the job up and the terminal event once it finishes.
+# _recover_unfinished_jobs() is called once at startup to replay the
+# journal: jobs with a "queued" event but no terminal event are re-enqueued
+# (exactly the jobs the issue describes as silently lost), and jobs that
+# *did* reach a terminal event are used to repopulate JOB_STATUS for them
+# — see that function's docstring for why the journal itself still drops
+# terminal entries on compaction even though JOB_STATUS keeps them.
 #
 # JOB_STATUS is the in-memory counterpart backing GET /checkstatus/{job_id}.
-# It is not itself durable — a job shown as "running" when the process
-# died reverts to "queued" after the journal replay below, which is the
-# correct outcome, since that run never actually finished.
+# It is not itself durable — a job shown as "running" when the process died
+# reverts to "queued" after the journal replay below (correct, since that
+# run never actually finished), while a job that reached "done"/"failed"
+# is restored to that same terminal status from the journal.
 
 JOB_STATUS_LOCK = threading.Lock()
 JOB_STATUS: dict[str, dict] = {}
@@ -272,21 +276,41 @@ def _replace_journal_atomically(lines: list[str]) -> None:
         pass
 
 
-def _recover_unfinished_jobs() -> list[tuple[str, TriggerRequest]]:
+def _recover_unfinished_jobs() -> tuple[list[tuple[str, TriggerRequest]], list[dict]]:
     """
-    Replay JOB_JOURNAL_PATH to find jobs whose "queued" event has no
-    matching "done"/"failed" event — these are the ones a previous process
-    exit (crash or restart) lost before a worker finished them. Returns
-    them as (job_id, TriggerRequest) pairs to re-enqueue at startup, and
-    rewrites the journal to drop already-terminal entries so the file
-    doesn't grow without bound across restarts.
+    Replay JOB_JOURNAL_PATH and return (unfinished, terminal_status_entries):
+
+      - unfinished: (job_id, TriggerRequest) pairs whose "queued" event has
+        no matching "done"/"failed" event — these are the ones a previous
+        process exit (crash or restart) lost before a worker finished them,
+        to be re-enqueued at startup.
+      - terminal_status_entries: full JOB_STATUS-shaped dicts for jobs that
+        *did* reach "done"/"failed" before this restart. JOB_STATUS is
+        in-memory only and gets wiped on every restart, so without this,
+        GET /checkstatus/{job_id} would 404 for a job that completed just
+        before the process stopped, even though its outcome is sitting
+        right there in the journal. Reconstructed from whichever of
+        "queued"/"running"/the terminal event are present for that job_id
+        — "running"'s started_at may be absent if the process died before
+        that event was journaled, in which case it's reported as null
+        rather than guessed.
+
+    The journal itself is still compacted down to just the still-unfinished
+    "queued" events (started_at/running and terminal events are dropped),
+    so a long-running instance's journal stays bounded by the current
+    backlog rather than growing forever — terminal status is preserved
+    in-memory for the restart that follows, not forever. Written atomically
+    (temp file + os.replace) so a crash mid-rewrite can never leave the
+    journal truncated/empty — the one thing that would defeat the entire
+    point of this journal.
     """
     with JOURNAL_LOCK:
         if not os.path.exists(JOB_JOURNAL_PATH):
-            return []
+            return [], []
 
         queued_events: dict[str, dict] = {}
-        terminal_ids: set[str] = set()
+        running_events: dict[str, dict] = {}
+        terminal_events: dict[str, dict] = {}
 
         with open(JOB_JOURNAL_PATH, "r", encoding="utf-8") as f:
             for line in f:
@@ -304,31 +328,44 @@ def _recover_unfinished_jobs() -> list[tuple[str, TriggerRequest]]:
                     continue
                 if event.get("event") == "queued":
                     queued_events[job_id] = event
+                elif event.get("event") == "running":
+                    running_events[job_id] = event
                 elif event.get("event") in ("done", "failed"):
-                    terminal_ids.add(job_id)
+                    terminal_events[job_id] = event
 
         unfinished: list[tuple[str, TriggerRequest]] = []
+        terminal_status_entries: list[dict] = []
         for job_id, event in queued_events.items():
-            if job_id in terminal_ids:
-                continue
-            try:
-                req = TriggerRequest(**event["request"])
-            except Exception:
-                print(f"[RECOVERY] Skipping unreplayable journal entry for job_id={job_id}")
-                continue
-            unfinished.append((job_id, req))
+            terminal = terminal_events.get(job_id)
+            if terminal is None:
+                try:
+                    req = TriggerRequest(**event["request"])
+                except Exception:
+                    print(f"[RECOVERY] Skipping unreplayable journal entry for job_id={job_id}")
+                    continue
+                unfinished.append((job_id, req))
+            else:
+                request = event.get("request") or {}
+                running = running_events.get(job_id)
+                terminal_status_entries.append({
+                    "job_id":      job_id,
+                    "status":      terminal.get("event"),
+                    "table":       request.get("table"),
+                    "raw_path":    request.get("raw_path"),
+                    "queued_at":   event.get("queued_at"),
+                    "started_at":  running.get("started_at") if running else None,
+                    "finished_at": terminal.get("finished_at"),
+                    "error":       terminal.get("error"),
+                })
 
         # Compact: rewrite the journal to keep only the still-unfinished
-        # "queued" events, so a long-running instance's journal stays
-        # bounded by the current backlog rather than growing forever.
-        # Written atomically (temp file + os.replace) so a crash mid-
-        # rewrite can never leave the journal truncated/empty — the one
-        # thing that would defeat the entire point of this journal.
+        # "queued" events (see docstring above for why terminal/running
+        # events aren't kept here even though they were just used above).
         _replace_journal_atomically([
             json.dumps(queued_events[job_id]) + "\n" for job_id, _req in unfinished
         ])
 
-    return unfinished
+    return unfinished, terminal_status_entries
 
 # ===================================================================
 # HEALTH ENDPOINT
@@ -439,10 +476,18 @@ def worker(worker_id: int) -> None:
         job_id, req = job_queue.get()
         print(f"[WORKER-{worker_id}] Picked job: {req.raw_path} (job_id={job_id})")
 
+        started_at = time.time()
         with JOB_STATUS_LOCK:
             entry = JOB_STATUS.setdefault(job_id, {"job_id": job_id, "table": req.table, "raw_path": req.raw_path, "error": None})
             entry["status"] = "running"
-            entry["started_at"] = time.time()
+            entry["started_at"] = started_at
+        try:
+            # Best-effort: if this is lost (process dies before it lands),
+            # a later restart's status reconstruction just reports
+            # started_at as null for this job rather than failing anything.
+            _journal_append({"job_id": job_id, "event": "running", "started_at": started_at})
+        except Exception as e:
+            print(f"[WORKER-{worker_id}] Failed to journal running event for job_id={job_id}: {e}")
 
         # Block new ETL work while views are being built.
         with STATE_COND:
@@ -476,19 +521,34 @@ def worker(worker_id: int) -> None:
                     COMPLETED_TABLES.add(completed_table)
 
             terminal_event = "done" if job_success else "failed"
+            finished_at = time.time()
             with JOB_STATUS_LOCK:
                 entry = JOB_STATUS.setdefault(job_id, {"job_id": job_id, "table": req.table, "raw_path": req.raw_path})
                 entry["status"] = terminal_event
-                entry["finished_at"] = time.time()
+                entry["finished_at"] = finished_at
                 entry["error"] = job_error
-            try:
-                _journal_append({"job_id": job_id, "event": terminal_event, "finished_at": time.time()})
-            except Exception as e:
-                # This only affects restart-recovery bookkeeping for this
-                # one job (it may get needlessly re-run after a future
-                # restart) — must not crash the worker thread or skip the
-                # real completion work above, which has already happened.
-                print(f"[WORKER-{worker_id}] Failed to journal terminal event for job_id={job_id}: {e}")
+
+            # Retry a few times before giving up: if this write never lands,
+            # _recover_unfinished_jobs() has no way to tell this job apart
+            # from one that's genuinely still queued, and would re-run it
+            # after a future restart — retrying durably here is cheaper and
+            # safer than relying on every ETL's run() being idempotent.
+            journal_event = {"job_id": job_id, "event": terminal_event, "finished_at": finished_at, "error": job_error}
+            for attempt in range(3):
+                try:
+                    _journal_append(journal_event)
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        print(f"[WORKER-{worker_id}] Retry {attempt + 1}/3: failed to journal terminal event for job_id={job_id}: {e}")
+                        time.sleep(0.5 * (attempt + 1))
+                    else:
+                        # Out of retries. This only affects restart-recovery
+                        # bookkeeping for this one job (it may get needlessly
+                        # re-run after a future restart) — must not crash the
+                        # worker thread or skip the real completion work
+                        # above, which has already happened.
+                        print(f"[WORKER-{worker_id}] Giving up after 3 attempts: failed to journal terminal event for job_id={job_id}: {e}")
 
             maybe_run_views_after_full_pipeline()
 
@@ -496,7 +556,9 @@ def worker(worker_id: int) -> None:
 # STARTUP RECOVERY  (#164 — re-queue anything lost by a previous exit)
 # ===================================================================
 
-for _job_id, _req in _recover_unfinished_jobs():
+_unfinished_jobs, _terminal_status_entries = _recover_unfinished_jobs()
+
+for _job_id, _req in _unfinished_jobs:
     print(f"[RECOVERY] Re-queuing job from journal: {_req.raw_path} (job_id={_job_id})")
     with JOB_STATUS_LOCK:
         JOB_STATUS[_job_id] = {
@@ -510,6 +572,15 @@ for _job_id, _req in _recover_unfinished_jobs():
             "error":      None,
         }
     job_queue.put((_job_id, _req))
+
+# Restore status for jobs that finished before this restart, so
+# /checkstatus/{job_id} keeps answering for them this time around instead
+# of 404ing just because JOB_STATUS itself doesn't survive a restart.
+if _terminal_status_entries:
+    print(f"[RECOVERY] Restoring status for {len(_terminal_status_entries)} job(s) that finished before this restart")
+    with JOB_STATUS_LOCK:
+        for _entry in _terminal_status_entries:
+            JOB_STATUS[_entry["job_id"]] = _entry
 
 # ===================================================================
 # START WORKER THREADS
