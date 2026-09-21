@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import time
 import traceback
@@ -206,6 +207,17 @@ COMPLETED_TABLES: set[str] = set()
 JOB_STATUS_LOCK = threading.Lock()
 JOB_STATUS: dict[str, dict] = {}
 
+# Guards every read-modify-write of JOB_JOURNAL_PATH — both the plain
+# append in _journal_append() and the atomic rewrite in
+# _recover_unfinished_jobs()'s compaction step. /checksubmit runs in
+# FastAPI's threadpool, so concurrent requests (and, with NUM_WORKERS>1,
+# concurrent workers writing terminal events) can call _journal_append()
+# at the same time; O_APPEND only guarantees the *position* of each
+# write() is atomic, not that a whole multi-line buffered write can't
+# interleave with another thread's, so an unlocked writer risks a
+# malformed line that _recover_unfinished_jobs() would then silently skip.
+JOURNAL_LOCK = threading.Lock()
+
 
 def _journal_append(event: dict) -> None:
     """
@@ -214,11 +226,50 @@ def _journal_append(event: dict) -> None:
     swallowing it — submit() below relies on that to avoid acking a job
     whose "queued" event didn't actually make it to disk.
     """
-    os.makedirs(os.path.dirname(JOB_JOURNAL_PATH), exist_ok=True)
-    with open(JOB_JOURNAL_PATH, "a", encoding="utf-8") as f:
+    directory = os.path.dirname(JOB_JOURNAL_PATH) or "."
+    os.makedirs(directory, exist_ok=True)
+    with JOURNAL_LOCK, open(JOB_JOURNAL_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(event) + "\n")
         f.flush()
         os.fsync(f.fileno())
+
+
+def _replace_journal_atomically(lines: list[str]) -> None:
+    """
+    Replace JOB_JOURNAL_PATH's contents with `lines` without ever leaving it
+    truncated: write to a temp file in the same directory, fsync it, then
+    os.replace() it over the real path (atomic on POSIX — the journal is
+    either the old, fully-written file or the new one, never a partial
+    file). Also fsyncs the containing directory so the rename itself
+    survives a crash, not just the file's own contents.
+
+    Directory fsync is a best-effort POSIX durability step — some
+    platforms/filesystems don't support fsync'ing a directory fd, so that
+    part is allowed to fail silently rather than break the replace, which
+    has already succeeded by that point.
+    """
+    directory = os.path.dirname(JOB_JOURNAL_PATH) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".job_journal.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, JOB_JOURNAL_PATH)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
 
 
 def _recover_unfinished_jobs() -> list[tuple[str, TriggerRequest]]:
@@ -230,48 +281,52 @@ def _recover_unfinished_jobs() -> list[tuple[str, TriggerRequest]]:
     rewrites the journal to drop already-terminal entries so the file
     doesn't grow without bound across restarts.
     """
-    if not os.path.exists(JOB_JOURNAL_PATH):
-        return []
+    with JOURNAL_LOCK:
+        if not os.path.exists(JOB_JOURNAL_PATH):
+            return []
 
-    queued_events: dict[str, dict] = {}
-    terminal_ids: set[str] = set()
+        queued_events: dict[str, dict] = {}
+        terminal_ids: set[str] = set()
 
-    with open(JOB_JOURNAL_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+        with open(JOB_JOURNAL_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    # A hard crash can truncate the last line mid-write —
+                    # skip it rather than let one bad line block startup.
+                    continue
+                job_id = event.get("job_id")
+                if not job_id:
+                    continue
+                if event.get("event") == "queued":
+                    queued_events[job_id] = event
+                elif event.get("event") in ("done", "failed"):
+                    terminal_ids.add(job_id)
+
+        unfinished: list[tuple[str, TriggerRequest]] = []
+        for job_id, event in queued_events.items():
+            if job_id in terminal_ids:
                 continue
             try:
-                event = json.loads(line)
-            except ValueError:
-                # A hard crash can truncate the last line mid-write — skip
-                # it rather than let one bad line block startup.
+                req = TriggerRequest(**event["request"])
+            except Exception:
+                print(f"[RECOVERY] Skipping unreplayable journal entry for job_id={job_id}")
                 continue
-            job_id = event.get("job_id")
-            if not job_id:
-                continue
-            if event.get("event") == "queued":
-                queued_events[job_id] = event
-            elif event.get("event") in ("done", "failed"):
-                terminal_ids.add(job_id)
+            unfinished.append((job_id, req))
 
-    unfinished: list[tuple[str, TriggerRequest]] = []
-    for job_id, event in queued_events.items():
-        if job_id in terminal_ids:
-            continue
-        try:
-            req = TriggerRequest(**event["request"])
-        except Exception:
-            print(f"[RECOVERY] Skipping unreplayable journal entry for job_id={job_id}")
-            continue
-        unfinished.append((job_id, req))
-
-    # Compact: rewrite the journal to keep only the still-unfinished
-    # "queued" events, so a long-running instance's journal stays bounded
-    # by the current backlog rather than growing forever.
-    with open(JOB_JOURNAL_PATH, "w", encoding="utf-8") as f:
-        for job_id, _req in unfinished:
-            f.write(json.dumps(queued_events[job_id]) + "\n")
+        # Compact: rewrite the journal to keep only the still-unfinished
+        # "queued" events, so a long-running instance's journal stays
+        # bounded by the current backlog rather than growing forever.
+        # Written atomically (temp file + os.replace) so a crash mid-
+        # rewrite can never leave the journal truncated/empty — the one
+        # thing that would defeat the entire point of this journal.
+        _replace_journal_atomically([
+            json.dumps(queued_events[job_id]) + "\n" for job_id, _req in unfinished
+        ])
 
     return unfinished
 
@@ -548,6 +603,8 @@ def check_status(job_id: str):
     """
     with JOB_STATUS_LOCK:
         status_entry = JOB_STATUS.get(job_id)
+        if status_entry is not None:
+            status_entry = dict(status_entry)
     if status_entry is None:
         raise HTTPException(status_code=404, detail=f"Unknown job_id: {job_id}")
     return status_entry
