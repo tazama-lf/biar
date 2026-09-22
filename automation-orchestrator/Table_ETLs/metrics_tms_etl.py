@@ -77,17 +77,20 @@ class MetricsTMSETL(BaseETL):
 
     def _aggregate_evaluated(
         self, eval_df: DataFrame
-    ) -> Tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
-        """Return (evaluated_counts_hourly, latency_hourly, latency_valid, dq_excluded_hourly).
+    ) -> Tuple[DataFrame, DataFrame, DataFrame, DataFrame, DataFrame]:
+        """Return (evaluated_counts_hourly, latency_hourly, latency_valid, dq_excluded_hourly, eval_count_hourly).
 
         - `evaluated_counts_hourly`: hourly counts of evaluated transactions (by tx_msg_id)
-        - `latency_hourly`: hourly latency aggregates (avg/p95/count) — no evaluated-count
-          column, so joining it against `evaluated_counts_hourly` in `_build_combined`
-          doesn't produce a duplicate `transactions_evaluated` column.
+        - `latency_hourly`: hourly latency aggregates (avg/p95) over valid rows only — no
+          evaluated-count column, so joining it against `evaluated_counts_hourly` in
+          `_build_combined` doesn't produce a duplicate `transactions_evaluated` column.
         - `latency_valid`: raw per-evaluation rows with `e2e_eval_time_ms` (used for correct
           rollups). Negative-latency rows (clock skew) are excluded here.
         - `dq_excluded_hourly`: hourly counts of rows excluded from `latency_valid` because
           `e2e_eval_time_ms < 0` — surfaced as `dq_excluded_count`.
+        - `eval_count_hourly`: hourly `evaluation_count` computed over `latency_all` (valid +
+          excluded), so a bucket's evaluation_count still counts DQ-excluded rows even when a
+          valid and an excluded row land in the same hour.
         """
         # Hourly counts of evaluated transactions
         evaluated = (
@@ -156,7 +159,6 @@ class MetricsTMSETL(BaseETL):
             F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
                 "p95_evaluation_time_ms"
             ),
-            F.count("e2e_eval_time_ms").alias("evaluation_count"),
         )
 
         dq_excluded_hourly = latency_excluded.groupBy(
@@ -167,7 +169,23 @@ class MetricsTMSETL(BaseETL):
             "metric_quarter",
         ).agg(F.count("e2e_eval_time_ms").alias("dq_excluded_count"))
 
-        return evaluated_counts_hourly, latency_hourly, latency_valid, dq_excluded_hourly
+        # evaluation_count over ALL rows with both timestamps present (valid + excluded),
+        # so it still counts DQ-excluded rows per the Transaction Evaluation Time spec.
+        eval_count_hourly = latency_all.groupBy(
+            "metric_year",
+            "metric_month",
+            "metric_date",
+            "metric_hour",
+            "metric_quarter",
+        ).agg(F.count("e2e_eval_time_ms").alias("evaluation_count"))
+
+        return (
+            evaluated_counts_hourly,
+            latency_hourly,
+            latency_valid,
+            dq_excluded_hourly,
+            eval_count_hourly,
+        )
 
     def _build_combined(
         self,
@@ -176,6 +194,7 @@ class MetricsTMSETL(BaseETL):
         latency_hourly: DataFrame,
         latency_valid: DataFrame,
         dq_excluded_hourly: DataFrame,
+        eval_count_hourly: DataFrame,
     ) -> DataFrame:
         """Combine received counts, evaluated counts and latency aggregates into canonical metrics rows and produce rollups.
 
@@ -207,6 +226,17 @@ class MetricsTMSETL(BaseETL):
             )
             .join(
                 dq_excluded_hourly,
+                on=[
+                    "metric_year",
+                    "metric_month",
+                    "metric_date",
+                    "metric_hour",
+                    "metric_quarter",
+                ],
+                how="full",
+            )
+            .join(
+                eval_count_hourly,
                 on=[
                     "metric_year",
                     "metric_month",
@@ -426,9 +456,13 @@ class MetricsTMSETL(BaseETL):
 
         # Hourly aggregates
         received_hourly = self._aggregate_received(tx)
-        counts_hourly, latency_hourly, latency_valid, dq_excluded_hourly = (
-            self._aggregate_evaluated(evaluation)
-        )
+        (
+            counts_hourly,
+            latency_hourly,
+            latency_valid,
+            dq_excluded_hourly,
+            eval_count_hourly,
+        ) = self._aggregate_evaluated(evaluation)
 
         # Build combined table with correct rollups (hourly + daily/monthly/quarterly/annually)
         combined = self._build_combined(
@@ -437,6 +471,7 @@ class MetricsTMSETL(BaseETL):
             latency_hourly,
             latency_valid,
             dq_excluded_hourly,
+            eval_count_hourly,
         )
 
         # Add write timestamp for precombine ordering
