@@ -99,13 +99,13 @@ class ConditionsTimelineViewETL(BaseETL):
 
         t = t0.select(
             F.col("t.transaction_id"),
-            F.col("t.end_to_end_id"),
-            F.col("t.tenant_id").alias("tx_tenant_id"),
-            F.col("t.tx_type"),
-            F.col("t.tx_msg_id"),
-            F.col("t.tx_status"),
-            F.col("t.tx_amount"),
-            F.col("t.tx_ccy"),
+            F.col("t.endtoendid").alias("end_to_end_id"),
+            F.col("t.tenantid").alias("tx_tenant_id"),
+            F.col("t.txtp").alias("tx_type"),
+            F.col("t.msgid").alias("tx_msg_id"),
+            F.col("t.txsts").alias("tx_status"),
+            F.col("t.amt").alias("tx_amount"),
+            F.col("t.ccy").alias("tx_ccy"),
             F.col("t.event_ts").alias("tx_event_ts"),
             F.col("t.event_date").alias("tx_event_date"),
         )
