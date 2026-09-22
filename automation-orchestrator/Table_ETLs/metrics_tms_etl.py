@@ -152,6 +152,28 @@ class MetricsTMSETL(BaseETL):
 
         return evaluated_counts_hourly, latency_hourly, latency_valid
 
+    @staticmethod
+    def _with_rate(df: DataFrame) -> DataFrame:
+        """Add received_vs_evaluated_rate_pct computed from this frame's own
+        transactions_received/transactions_evaluated columns.
+
+        Must be applied per-granularity on that granularity's own summed
+        counts, not averaged from another granularity's rates: bucket A
+        (100/50=200%) + bucket B (10/100=10%) must roll up to 110/150=73.3%,
+        not avg(200, 10)=105%.
+        """
+        return df.withColumn(
+            "received_vs_evaluated_rate_pct",
+            F.when(
+                F.col("transactions_evaluated") > 0,
+                F.round(
+                    (F.col("transactions_received") / F.col("transactions_evaluated"))
+                    * 100,
+                    2,
+                ),
+            ).otherwise(F.lit(None)),
+        )
+
     def _build_combined(
         self,
         received_hourly: DataFrame,
@@ -199,17 +221,7 @@ class MetricsTMSETL(BaseETL):
         hourly = hourly.withColumn("dq_excluded_count", F.lit(0).cast("long"))
 
         # Compute received_vs_evaluated_rate_pct
-        hourly = hourly.withColumn(
-            "received_vs_evaluated_rate_pct",
-            F.when(
-                F.col("transactions_evaluated") > 0,
-                F.round(
-                    (F.col("transactions_received") / F.col("transactions_evaluated"))
-                    * 100,
-                    2,
-                ),
-            ).otherwise(F.lit(None)),
-        )
+        hourly = self._with_rate(hourly)
 
         # Daily rollups: counts by summing hourly counts, latency from raw rows
         daily_counts = (
@@ -225,6 +237,7 @@ class MetricsTMSETL(BaseETL):
             .withColumn("metric_hour", F.lit(-1))
             .withColumn("metric_granularity", F.lit("Daily"))
         )
+        daily_counts = self._with_rate(daily_counts)
 
         daily_latency = (
             latency_valid.groupBy("metric_year", "metric_month", "metric_date")
@@ -253,6 +266,7 @@ class MetricsTMSETL(BaseETL):
             .withColumn("metric_hour", F.lit(-1))
             .withColumn("metric_granularity", F.lit("Monthly"))
         )
+        monthly_counts = self._with_rate(monthly_counts)
 
         monthly_latency = (
             latency_valid.groupBy("metric_year", "metric_month")
@@ -282,6 +296,7 @@ class MetricsTMSETL(BaseETL):
             .withColumn("metric_hour", F.lit(-1))
             .withColumn("metric_granularity", F.lit("Quarterly"))
         )
+        quarterly_counts = self._with_rate(quarterly_counts)
 
         quarterly_latency = (
             latency_valid.groupBy("metric_year", "metric_quarter")
@@ -312,6 +327,7 @@ class MetricsTMSETL(BaseETL):
             .withColumn("metric_quarter", F.lit(None).cast("int"))
             .withColumn("metric_granularity", F.lit("Annually"))
         )
+        annual_counts = self._with_rate(annual_counts)
 
         annual_latency = (
             latency_valid.groupBy("metric_year")
