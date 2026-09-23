@@ -2,8 +2,10 @@
 
 Covers the case where a valid-latency row and a negative-latency
 (DQ-excluded) row land in the *same* hourly bucket, which previously
-caused `evaluation_count` to silently drop the excluded row (see PR #182
-review discussion).
+caused `evaluation_count` to silently drop the excluded row, and the case
+where a valid-latency row with no `tx_msg_id` had its avg/p95 latency
+silently dropped by an intermediate left join (see PR #182 review
+discussion).
 """
 
 from __future__ import annotations
@@ -116,3 +118,48 @@ def test_build_combined_reconciles_evaluation_and_dq_excluded_counts(etl, spark)
     daily_row = combined.filter(combined.metric_granularity == "Daily").collect()[0]
     assert daily_row["evaluation_count"] == 2
     assert daily_row["dq_excluded_count"] == 1
+
+
+def test_build_combined_preserves_latency_for_null_tx_msg_id_bucket(etl, spark):
+    # A single valid-latency row with no tx_msg_id (so absent from
+    # counts_hourly) and no received row in its bucket. Before the
+    # latency_hourly join was changed from "left" to "full", this bucket's
+    # avg/p95 latency was dropped at the latency_hourly join step and only
+    # resurrected (with nulled-out latency) by the later eval_count_hourly
+    # full join (see PR #182 review discussion).
+    rows = [
+        (None, datetime(2026, 1, 1, 10, 5, 0), datetime(2026, 1, 1, 10, 0, 0)),
+    ]
+    eval_df = spark.createDataFrame(
+        rows, ["tx_msg_id", "event_ts", "dc_cre_dt_tm"]
+    )
+
+    (
+        counts_hourly,
+        latency_hourly,
+        latency_valid,
+        dq_excluded_hourly,
+        eval_count_hourly,
+    ) = etl._aggregate_evaluated(eval_df)
+
+    assert counts_hourly.count() == 0
+    assert dq_excluded_hourly.count() == 0
+    assert latency_valid.count() == 1
+
+    combined = etl._build_combined(
+        _empty_received_hourly(spark),
+        counts_hourly,
+        latency_hourly,
+        latency_valid,
+        dq_excluded_hourly,
+        eval_count_hourly,
+    )
+
+    hourly_row = combined.filter(
+        combined.metric_granularity == "Hourly"
+    ).collect()[0]
+    assert hourly_row["evaluation_count"] == 1
+    assert hourly_row["dq_excluded_count"] == 0
+    assert hourly_row["transactions_evaluated"] == 0
+    assert hourly_row["avg_evaluation_time_ms"] == pytest.approx(300000.0)
+    assert hourly_row["p95_evaluation_time_ms"] == pytest.approx(300000.0)

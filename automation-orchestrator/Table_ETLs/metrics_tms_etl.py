@@ -222,7 +222,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_hour",
                     "metric_quarter",
                 ],
-                how="left",
+                how="full",
             )
             .join(
                 dq_excluded_hourly,
