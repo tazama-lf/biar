@@ -116,6 +116,7 @@ class ConditionsTimelineViewETL(BaseETL):
             F.col("a.alert_id"),
             F.col("a.case_id"),
             F.col("a.tx_msg_id").alias("a_tx_msg_id"),
+            F.col("a.efrup_subruleref"),
         ).dropDuplicates(["a_tx_msg_id"])
 
         t = (
@@ -146,12 +147,6 @@ class ConditionsTimelineViewETL(BaseETL):
                 F.col("cs_case_id").isNotNull() | (F.coalesce(F.col("has_completed_task"), F.lit(0)) == 1),
                 F.lit(1)
             ).otherwise(F.lit(0))
-        )
-
-        t = t.withColumn(
-            "tx_block_override_status",
-            F.when(F.upper(F.col("tx_status")).isin("BLOCKED", "REJECTED"), F.lit("BLOCKED"))
-            .otherwise(F.lit("NONE"))
         )
 
         return t
@@ -254,7 +249,7 @@ class ConditionsTimelineViewETL(BaseETL):
             F.col("tx.tx_event_ts").alias("tx_event_ts"),
             F.col("tx.is_alerted_tx").alias("tx_is_alerted"),
             F.col("tx.is_investigated_tx").alias("tx_is_investigated"),
-            F.col("tx.tx_block_override_status").alias("tx_block_override_status"),
+            F.col("tx.efrup_subruleref").alias("efrup_subruleref"),
             F.col("cond.condition_ingested_at_ts").alias("cond_ingested_at_ts"),
             F.col("ingested_at_ts"),
         )
