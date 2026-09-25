@@ -98,6 +98,25 @@ class FullETLOrchestrator:
     # Tables with no Ozone/S3A source file — they aggregate other gold tables directly.
     _AGGREGATION_ONLY_TABLES: set[str] = {"metrics_tms", "metrics"}
 
+    # _ETL_REGISTRY above accepts multiple aliases (singular/plural) for the
+    # same table, e.g. "transaction"/"transactions", "condition"/"conditions",
+    # and routes both to the same ETL class. But downstream consumers of the
+    # *resolved* table name — ViewsOrchestrator._VIEW_DEPENDENCIES and the
+    # tables_hint dirty-set it's matched against — key on exactly one spelling
+    # per table (whichever matches the actual bronze/silver/gold folder each
+    # ETL writes to). Without collapsing aliases here, a job resolved to the
+    # "wrong" alias (e.g. live NiFi jobs send "transaction" singular) would
+    # never match its view's dependency set and that view would silently stop
+    # being rebuilt. Only maps the non-canonical alias of each pair a view
+    # actually depends on — add more here if a future view depends on another
+    # aliased table not listed below.
+    _CANONICAL_TABLE_NAMES: dict[str, str] = {
+        "transaction": "transactions",
+        "conditions": "condition",
+        "rules": "rule",
+        "typology": "typologies",
+    }
+
     def __init__(
         self,
         spark: SparkSession,
@@ -217,10 +236,8 @@ class FullETLOrchestrator:
         table_name = cls._normalize_table_name(table)
         path_table = cls._resolve_table_name_from_paths(raw_path=raw_path, object_key=object_key)
 
-        if table_name:
-            return table_name
-
-        return path_table
+        resolved = table_name or path_table
+        return cls._CANONICAL_TABLE_NAMES.get(resolved, resolved)
 
     @classmethod
     def _resolve_table_name_from_paths(
