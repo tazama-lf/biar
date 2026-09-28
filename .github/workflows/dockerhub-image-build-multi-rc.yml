@@ -56,7 +56,7 @@ jobs:
             pass_lib_token: false
 
     permissions:
-      packages: write
+      packages: read  # npm install of @tazama-lf packages from GitHub Packages (images are pushed to Docker Hub, not GHCR)
       contents: read
       attestations: write
       id-token: write
@@ -118,7 +118,7 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image_suffix }}
           cache-to: type=gha,mode=min,scope=${{ matrix.image_suffix }}
           secrets: |
-            GH_TOKEN=${{ secrets.GH_TOKEN_LIB }}
+            GH_TOKEN=${{ github.token }}
 
       - name: Build and push ${{ matrix.image_suffix }} RC Docker image
         if: ${{ !matrix.pass_lib_token }}
