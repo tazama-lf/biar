@@ -49,6 +49,39 @@ class MetricsTMSETL(BaseETL):
         print("[MetricsTMSETL] ETL complete.")
         return result
 
+    def _drop_existing_table(self) -> None:
+        """Recursively delete the existing gold/metrics/tms table, if present.
+
+        Deletes through the Hadoop FileSystem API (not ``shutil``) so the same
+        code path works for local ``file://`` warehouses and remote ``s3a://``
+        Ozone/S3 warehouses.
+        """
+        jvm = self.spark._jvm
+        hadoop_conf = self.spark._jsc.hadoopConfiguration()
+        path = jvm.org.apache.hadoop.fs.Path(self.metrics_root)
+        fs = path.getFileSystem(hadoop_conf)
+        if fs.exists(path):
+            print(f"[MetricsTMSETL] Dropping existing table at {self.metrics_root}")
+            fs.delete(path, True)
+
+    def rebuild(self, source_path: str = "") -> str:
+        """Drop gold/metrics/tms and regenerate its full history from scratch.
+
+        gold/metrics/tms is a derived aggregate — fully reproducible from
+        gold/transactions + gold/evaluation — so dropping and regenerating is
+        the safe way to migrate a table onto the tenant-aware record key added
+        in #185. Hudi materialises ``_hoodie_record_key`` at write time and does
+        NOT migrate it when ``hoodie.datasource.write.recordkey.field`` changes,
+        so rows written under the old six-field key would otherwise keep a NULL
+        ``tenant_id`` and stay invisible to the tenant-scoped read paths forever,
+        sitting alongside fresh rows written under the new seven-field key.
+
+        Intended as a one-time deployment step. Safe to re-run: the table is
+        always fully regenerated from its upstream gold tables.
+        """
+        self._drop_existing_table()
+        return self.run(source_path)
+
     def _time_dims(self, ts_col: str) -> List[F.Column]:
         """Derive metric_date/hour/month/quarter/year columns from a timestamp column."""
         return [
