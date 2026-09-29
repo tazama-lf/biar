@@ -649,3 +649,11 @@ See `automation-orchestrator/Table_ETLs/metrics_tms_etl.py`. The ETL reads
 (transactions received, transactions evaluated, received vs evaluated rate, evaluation latency)
 and writes them to Hudi partitioned by `metric_year/metric_month/metric_date`.
 Dashboards should prefer this pre-aggregated table.
+
+Every row is scoped to a single tenant: `tenant_id` is part of the Hudi record key
+(`metric_year,metric_month,metric_date,metric_hour,metric_quarter,metric_granularity,tenant_id`).
+Hudi does not rewrite `_hoodie_record_key` for rows that already exist when the record key
+changes, so deploying the tenant-key change requires a one-time rebuild of the table:
+run `python rebuild_metrics_tms.py` from the automation-orchestrator (it drops
+`gold/metrics/tms` and regenerates its full history from `gold/transactions` +
+`gold/evaluation`).
