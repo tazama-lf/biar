@@ -277,25 +277,48 @@ def test_build_combined_keeps_tenants_separate_in_same_bucket(etl, spark):
     assert hourly["tenantB"]["evaluation_count"] == 1
 
 
-def test_rebuild_drops_existing_table_before_regenerating(spark, tmp_path, monkeypatch):
+def test_rebuild_promotes_staged_table_and_keeps_live_table_on_failure(
+    spark, tmp_path, monkeypatch
+):
     # Hudi does not migrate _hoodie_record_key for rows already written, so
-    # rebuild() must drop the old table before regenerating it (PR #186).
+    # rebuild() must regenerate the table. The replacement is built at a
+    # staging path and only promoted after the build succeeds — a failed
+    # rebuild must leave the live table untouched (CodeRabbit, PR #186).
     etl = MetricsTMSETL(spark, warehouse_root=tmp_path.as_uri())
-    table_dir = tmp_path / "gold" / "metrics" / "tms"
-    table_dir.mkdir(parents=True)
-    (table_dir / "stale_old_key_row.parquet").write_text(
+    live_dir = tmp_path / "gold" / "metrics" / "tms"
+    staging_dir = tmp_path / "gold" / "metrics" / "tms__rebuild_staging"
+    live_dir.mkdir(parents=True)
+    (live_dir / "stale_old_key_row.parquet").write_text(
         "row written under the old 6-field record key"
     )
 
-    calls = []
-    monkeypatch.setattr(
-        etl, "gold", lambda: calls.append("gold") or etl.metrics_root
-    )
+    # --- Failure case: the aggregation raises mid-rebuild. ---
+    def failing_gold():
+        raise RuntimeError("aggregation exploded")
 
+    monkeypatch.setattr(etl, "gold", failing_gold)
+    with pytest.raises(RuntimeError):
+        etl.rebuild("ignored-source-path")
+
+    assert (live_dir / "stale_old_key_row.parquet").exists()  # live table intact
+    assert not staging_dir.exists()  # partial staging table cleaned up
+    assert etl.metrics_root == live_dir.as_uri()  # metrics_root restored
+
+    # --- Success case: staged build is promoted onto the live path. ---
+    def working_gold():
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        (staging_dir / "new_key_row.parquet").write_text(
+            "row written under the new 7-field record key"
+        )
+        return etl.metrics_root
+
+    monkeypatch.setattr(etl, "gold", working_gold)
     etl.rebuild("ignored-source-path")
 
-    assert calls == ["gold"]       # the full aggregation re-ran
-    assert not table_dir.exists()  # the old table was dropped first
+    assert not staging_dir.exists()  # staging path consumed by the promotion
+    assert (live_dir / "new_key_row.parquet").exists()  # new table is live
+    assert not (live_dir / "stale_old_key_row.parquet").exists()  # old table gone
+    assert etl.metrics_root == live_dir.as_uri()
 
 
 def test_drop_existing_table_is_a_noop_when_table_missing(spark, tmp_path):

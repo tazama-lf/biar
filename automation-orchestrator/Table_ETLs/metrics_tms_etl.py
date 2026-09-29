@@ -64,23 +64,62 @@ class MetricsTMSETL(BaseETL):
             print(f"[MetricsTMSETL] Dropping existing table at {self.metrics_root}")
             fs.delete(path, True)
 
+    def _fs_delete(self, path_str: str) -> None:
+        """Recursively delete *path_str* via the Hadoop FileSystem API, if present."""
+        jvm = self.spark._jvm
+        hadoop_conf = self.spark._jsc.hadoopConfiguration()
+        path = jvm.org.apache.hadoop.fs.Path(path_str)
+        fs = path.getFileSystem(hadoop_conf)
+        if fs.exists(path):
+            print(f"[MetricsTMSETL] Deleting {path_str}")
+            fs.delete(path, True)
+
     def rebuild(self, source_path: str = "") -> str:
-        """Drop gold/metrics/tms and regenerate its full history from scratch.
+        """Regenerate gold/metrics/tms's full history and promote it atomically.
 
         gold/metrics/tms is a derived aggregate — fully reproducible from
-        gold/transactions + gold/evaluation — so dropping and regenerating is
-        the safe way to migrate a table onto the tenant-aware record key added
-        in #185. Hudi materialises ``_hoodie_record_key`` at write time and does
+        gold/transactions + gold/evaluation — so regenerating it is the safe
+        way to migrate the table onto the tenant-aware record key added in
+        #185. Hudi materialises ``_hoodie_record_key`` at write time and does
         NOT migrate it when ``hoodie.datasource.write.recordkey.field`` changes,
         so rows written under the old six-field key would otherwise keep a NULL
         ``tenant_id`` and stay invisible to the tenant-scoped read paths forever,
         sitting alongside fresh rows written under the new seven-field key.
 
-        Intended as a one-time deployment step. Safe to re-run: the table is
-        always fully regenerated from its upstream gold tables.
+        The replacement is built at a staging path first and only promoted
+        (staged table moved onto the live path) after the source reads,
+        aggregation and write all succeed — a failure at any step leaves the
+        current live table untouched and serving. Intended as a one-time
+        deployment step. Safe to re-run: the table is always fully regenerated
+        from its upstream gold tables.
         """
+        staging_root = f"{self.metrics_root}__rebuild_staging"
+        self._fs_delete(staging_root)  # clear any leftover from a failed run
+
+        live_root = self.metrics_root
+        try:
+            print(
+                f"[MetricsTMSETL] Rebuilding into staging path {staging_root} "
+                f"(live table at {live_root} stays untouched until promotion)"
+            )
+            self.metrics_root = staging_root
+            self.run(source_path)
+        except Exception:
+            # Build failed — keep the live table, drop only the partial staging table.
+            self._fs_delete(staging_root)
+            raise
+        finally:
+            self.metrics_root = live_root
+
+        # Build succeeded — promote: drop the old-key live table, move staging into place.
         self._drop_existing_table()
-        return self.run(source_path)
+        jvm = self.spark._jvm
+        hadoop_conf = self.spark._jsc.hadoopConfiguration()
+        src = jvm.org.apache.hadoop.fs.Path(staging_root)
+        dst = jvm.org.apache.hadoop.fs.Path(live_root)
+        src.getFileSystem(hadoop_conf).rename(src, dst)
+        print(f"[MetricsTMSETL] Promoted {staging_root} to {live_root}")
+        return live_root
 
     def _time_dims(self, ts_col: str) -> List[F.Column]:
         """Derive metric_date/hour/month/quarter/year columns from a timestamp column."""

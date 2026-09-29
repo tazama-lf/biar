@@ -21,6 +21,11 @@ correct migration (see issue #185's own "Proposed fix": *"Rebuild the table —
 it is a derived aggregate and can be regenerated from ``gold/transactions`` +
 ``gold/evaluation`` at any time."*).
 
+The rebuild is failure-safe: the replacement is built at
+``gold/metrics/tms__rebuild_staging`` and only promoted onto the live path
+after the source reads, aggregation and write all succeed. If anything fails,
+the current live table is left untouched and still serving.
+
 Usage
 -----
 From the automation-orchestrator directory / container:
