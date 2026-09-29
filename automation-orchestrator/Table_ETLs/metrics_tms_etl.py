@@ -181,6 +181,7 @@ class MetricsTMSETL(BaseETL):
             "metric_date",
             "metric_hour",
             "metric_quarter",
+            "tenant_id",
         ).agg(F.count("e2e_eval_time_ms").alias("dq_excluded_count"))
 
         # evaluation_count over ALL rows with both timestamps present (valid + excluded),
@@ -191,6 +192,7 @@ class MetricsTMSETL(BaseETL):
             "metric_date",
             "metric_hour",
             "metric_quarter",
+            "tenant_id",
         ).agg(F.count("e2e_eval_time_ms").alias("evaluation_count"))
 
         return (
@@ -270,6 +272,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_date",
                     "metric_hour",
                     "metric_quarter",
+                    "tenant_id",
                 ],
                 how="full",
             )
@@ -281,6 +284,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_date",
                     "metric_hour",
                     "metric_quarter",
+                    "tenant_id",
                 ],
                 how="full",
             )
