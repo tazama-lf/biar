@@ -11,11 +11,19 @@ The source dataframe is the raw event-history transactions table:
 This ETL intentionally does not read or derive anything from payment message
 tables. The original Ozone column names are preserved across the transaction
 layers.
+
+Gold adds debtor_entity_id / creditor_entity_id, resolved through the TMS
+account hierarchy (account -> gold/account_holder -> gold/entity). The debtor
+and creditor accounts depend on the message type: pacs.008 records carry
+source = debtor account, destination = creditor account, while pacs.002
+records carry them reversed (source = creditor, destination = debtor).
 """
 
 from __future__ import annotations
 
-from pyspark.sql import Column
+import os
+
+from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
@@ -37,6 +45,14 @@ class TransactionsETL(BaseETL):
     def gold_path(self) -> str:
         return f"{self.warehouse_root}/gold/transactions"
 
+    @property
+    def account_holder_path(self) -> str:
+        return f"{self.warehouse_root}/gold/account_holder"
+
+    @property
+    def entity_path(self) -> str:
+        return f"{self.warehouse_root}/gold/entity"
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -54,6 +70,86 @@ class TransactionsETL(BaseETL):
     def _event_ts(col_name: str) -> Column:
         """Parse the ISO timestamp emitted by Ozone event history."""
         return F.to_timestamp(F.regexp_replace(F.col(col_name).cast("string"), "Z$", ""))
+
+    def _load_optional(self, path: str) -> DataFrame | None:
+        """
+        Load a Hudi table, or None if it has not been created yet.
+
+        Only a table that does not exist is treated as absent. Read errors on
+        an existing table propagate, so a transient failure cannot overwrite
+        previously resolved entity ids with nulls.
+        """
+        if not os.path.exists(os.path.join(path, ".hoodie", "hoodie.properties")):
+            print(f"[TransactionsETL] {path} not created yet; entity ids will be null")
+            return None
+        return self.spark.read.format("hudi").load(path)
+
+    @staticmethod
+    def attach_party_entities(
+        tx: DataFrame,
+        account_holder: DataFrame | None,
+        entity: DataFrame | None,
+    ) -> DataFrame:
+        """
+        Add debtor_entity_id / creditor_entity_id to *tx*.
+
+        account -> account_holder (counterparty_id = holding entity) -> entity.
+        Left joins only: every transaction row is preserved, with null ids
+        where the hierarchy is incomplete. Each account resolves to at most
+        one holder (latest by event_ts), so no rows are fanned out.
+        """
+        is_pacs002 = F.lower(F.coalesce(F.col("txtp"), F.lit(""))).startswith("pacs.002")
+        tx = (
+            tx
+            .withColumn("_dbtr_acct", F.when(is_pacs002, F.col("destination")).otherwise(F.col("source")))
+            .withColumn("_cdtr_acct", F.when(is_pacs002, F.col("source")).otherwise(F.col("destination")))
+        )
+
+        if account_holder is None or entity is None:
+            return (
+                tx
+                .withColumn("debtor_entity_id", F.lit(None).cast("string"))
+                .withColumn("creditor_entity_id", F.lit(None).cast("string"))
+                .drop("_dbtr_acct", "_cdtr_acct")
+            )
+
+        w = Window.partitionBy("tenant_id", "account_id").orderBy(F.col("event_ts").desc_nulls_last())
+        holders = (
+            account_holder
+            .filter(F.col("account_id").isNotNull() & F.col("counterparty_id").isNotNull())
+            .withColumn("_rn", F.row_number().over(w))
+            .filter("_rn = 1")
+            .select("tenant_id", "account_id", "counterparty_id")
+        )
+        entities = entity.select("tenant_id", "entity_id").distinct()
+        resolved = (
+            holders
+            .join(
+                entities,
+                (holders.counterparty_id == entities.entity_id) & (holders.tenant_id == entities.tenant_id),
+                "inner",
+            )
+            .select(
+                holders.tenant_id.alias("_h_tenant"),
+                holders.account_id.alias("_h_account"),
+                entities.entity_id.alias("_h_entity"),
+            )
+        )
+
+        for acct_col, out_col in (("_dbtr_acct", "debtor_entity_id"), ("_cdtr_acct", "creditor_entity_id")):
+            r = resolved.select(
+                F.col("_h_tenant").alias(f"_{out_col}_tenant"),
+                F.col("_h_account").alias(f"_{out_col}_account"),
+                F.col("_h_entity").cast("string").alias(out_col),
+            )
+            tx = tx.join(
+                r,
+                (F.col(acct_col) == F.col(f"_{out_col}_account"))
+                & (F.col("tenantid") == F.col(f"_{out_col}_tenant")),
+                "left",
+            ).drop(f"_{out_col}_account", f"_{out_col}_tenant")
+
+        return tx.drop("_dbtr_acct", "_cdtr_acct")
 
     # ------------------------------------------------------------------
     # Bronze
@@ -154,6 +250,11 @@ class TransactionsETL(BaseETL):
 
     def gold(self) -> str:
         s = self.spark.read.format("hudi").load(self.silver_path)
+        s = self.attach_party_entities(
+            s,
+            self._load_optional(self.account_holder_path),
+            self._load_optional(self.entity_path),
+        )
 
         gold = (
             s
@@ -176,6 +277,8 @@ class TransactionsETL(BaseETL):
                 F.col("tenantid").cast("string").alias("tenantid"),
                 F.col("txsts").cast("string").alias("txsts"),
                 F.col("txtp").cast("string").alias("txtp"),
+                F.col("debtor_entity_id").cast("string").alias("debtor_entity_id"),
+                F.col("creditor_entity_id").cast("string").alias("creditor_entity_id"),
                 F.col("event_ts").cast("timestamp").alias("event_ts"),
                 F.col("event_date").cast("date").alias("event_date"),
                 F.col("created_at_epoch_ms").cast("long").alias("created_at_epoch_ms"),
