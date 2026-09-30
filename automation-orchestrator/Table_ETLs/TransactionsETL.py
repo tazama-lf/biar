@@ -21,8 +21,8 @@ records carry them reversed (source = creditor, destination = debtor).
 
 from __future__ import annotations
 
-from py4j.protocol import Py4JJavaError
-from pyspark.errors import AnalysisException
+import os
+
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -72,12 +72,17 @@ class TransactionsETL(BaseETL):
         return F.to_timestamp(F.regexp_replace(F.col(col_name).cast("string"), "Z$", ""))
 
     def _load_optional(self, path: str) -> DataFrame | None:
-        """Load a Hudi table, or None if it has not been created yet."""
-        try:
-            return self.spark.read.format("hudi").load(path)
-        except (AnalysisException, Py4JJavaError) as exc:
-            print(f"[TransactionsETL] {path} unavailable ({exc.__class__.__name__}); entity ids will be null")
+        """
+        Load a Hudi table, or None if it has not been created yet.
+
+        Only a table that does not exist is treated as absent. Read errors on
+        an existing table propagate, so a transient failure cannot overwrite
+        previously resolved entity ids with nulls.
+        """
+        if not os.path.exists(os.path.join(path, ".hoodie", "hoodie.properties")):
+            print(f"[TransactionsETL] {path} not created yet; entity ids will be null")
             return None
+        return self.spark.read.format("hudi").load(path)
 
     @staticmethod
     def attach_party_entities(
