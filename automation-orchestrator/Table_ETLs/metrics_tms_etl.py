@@ -102,7 +102,10 @@ class MetricsTMSETL(BaseETL):
         aggregation and write all succeed — a failure at any step leaves the
         current live table untouched and serving. During promotion the live
         table is moved aside to a backup rather than deleted, so a failed
-        promotion can be rolled back. Intended as a one-time deployment step.
+        promotion triggers a rollback that restores the live table. Rollback
+        is attempted, not guaranteed: if the restore itself fails, the backup
+        is left in place and the error names its path, so recovery is manual
+        but the data is never lost. Intended as a one-time deployment step.
         Safe to re-run: the table is always fully regenerated from its upstream
         gold tables.
         """

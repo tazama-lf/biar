@@ -26,7 +26,10 @@ The rebuild is failure-safe: the replacement is built at
 after the source reads, aggregation and write all succeed. During promotion the
 live table is moved aside to ``gold/metrics/tms__rebuild_backup`` rather than
 deleted, so a failed promotion (S3A renames are copy-then-delete and can fail
-partway) is rolled back and the live table keeps serving.
+partway) triggers a rollback that restores the live table. Rollback is
+attempted, not guaranteed: if the restore itself fails, the backup is left in
+place and the error names its path, so recovery is manual but the data is never
+lost.
 
 Usage
 -----
