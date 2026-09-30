@@ -73,12 +73,14 @@ class TransactionHistoryViewETL(BaseETL):
                 F.col("tx_tenant_id").cast("string").alias("p8_tenant_id"),
                 F.col("dbtr_name").cast("string").alias("p8_dbtr_name"),
                 F.col("cdtr_name").cast("string").alias("p8_cdtr_name"),
+                F.col("ingested_at_ts").cast("timestamp").alias("p8_ingested_at_ts"),
             ],
         )
 
         joined = base_tx
         if p8 is not None:
-            p8 = p8.dropDuplicates(["p8_tenant_id", "p8_end_to_end_id"])
+            w8 = Window.partitionBy("p8_tenant_id", "p8_end_to_end_id").orderBy(F.col("p8_ingested_at_ts").desc_nulls_last())
+            p8 = p8.withColumn("_rn", F.row_number().over(w8)).filter("_rn = 1").drop("_rn", "p8_ingested_at_ts")
             joined = joined.join(
                 p8,
                 (joined.end_to_end_id == p8.p8_end_to_end_id) & (joined.tenant_id == p8.p8_tenant_id),

@@ -101,6 +101,7 @@ class TransactionDetailViewETL(BaseETL):
                 F.col("cdtr_agt_mmb_id").cast("string").alias("p8_instd_mmb_id"),
                 F.col("charge_amt").cast("double").alias("p8_charge_total_amount"),
                 F.col("charge_ccy").cast("string").alias("p8_charge_currency"),
+                F.col("ingested_at_ts").cast("timestamp").alias("p8_ingested_at_ts"),
             ],
         )
         p2 = self._safe_load(
@@ -119,7 +120,8 @@ class TransactionDetailViewETL(BaseETL):
 
         joined = tx
         if p8 is not None:
-            p8 = p8.dropDuplicates(["p8_tx_tenant_id", "p8_end_to_end_id"])
+            w8 = Window.partitionBy("p8_tx_tenant_id", "p8_end_to_end_id").orderBy(F.col("p8_ingested_at_ts").desc_nulls_last())
+            p8 = p8.withColumn("_rn", F.row_number().over(w8)).filter("_rn = 1").drop("_rn", "p8_ingested_at_ts")
             joined = joined.join(
                 p8,
                 (joined.end_to_end_id == p8.p8_end_to_end_id) & (joined.tx_tenant_id == p8.p8_tx_tenant_id),
