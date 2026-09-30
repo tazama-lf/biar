@@ -49,23 +49,13 @@ class MetricsTMSETL(BaseETL):
         print("[MetricsTMSETL] ETL complete.")
         return result
 
-    def _drop_existing_table(self) -> None:
-        """Recursively delete the existing gold/metrics/tms table, if present.
-
-        Deletes through the Hadoop FileSystem API (not ``shutil``) so the same
-        code path works for local ``file://`` warehouses and remote ``s3a://``
-        Ozone/S3 warehouses.
-        """
-        jvm = self.spark._jvm
-        hadoop_conf = self.spark._jsc.hadoopConfiguration()
-        path = jvm.org.apache.hadoop.fs.Path(self.metrics_root)
-        fs = path.getFileSystem(hadoop_conf)
-        if fs.exists(path):
-            print(f"[MetricsTMSETL] Dropping existing table at {self.metrics_root}")
-            fs.delete(path, True)
-
     def _fs_delete(self, path_str: str) -> None:
-        """Recursively delete *path_str* via the Hadoop FileSystem API, if present."""
+        """Recursively delete *path_str* via the Hadoop FileSystem API, if present.
+
+        Uses the Hadoop FileSystem API (not ``shutil``) so the same code path
+        works for local ``file://`` warehouses and remote ``s3a://`` Ozone/S3
+        warehouses.
+        """
         jvm = self.spark._jvm
         hadoop_conf = self.spark._jsc.hadoopConfiguration()
         path = jvm.org.apache.hadoop.fs.Path(path_str)
@@ -73,6 +63,27 @@ class MetricsTMSETL(BaseETL):
         if fs.exists(path):
             print(f"[MetricsTMSETL] Deleting {path_str}")
             fs.delete(path, True)
+
+    def _fs_exists(self, path_str: str) -> bool:
+        """Return whether *path_str* exists, via the Hadoop FileSystem API."""
+        jvm = self.spark._jvm
+        hadoop_conf = self.spark._jsc.hadoopConfiguration()
+        return jvm.org.apache.hadoop.fs.Path(path_str).getFileSystem(hadoop_conf).exists(
+            jvm.org.apache.hadoop.fs.Path(path_str)
+        )
+
+    def _fs_rename(self, src_str: str, dst_str: str) -> bool:
+        """Move *src_str* to *dst_str*, returning the ``FileSystem.rename()`` result.
+
+        Callers must check the return value: S3A emulates a directory rename as a
+        copy-then-delete, so it is **not** atomic and can fail partway (returning
+        ``False`` or raising), leaving a partial state.
+        """
+        jvm = self.spark._jvm
+        hadoop_conf = self.spark._jsc.hadoopConfiguration()
+        src = jvm.org.apache.hadoop.fs.Path(src_str)
+        dst = jvm.org.apache.hadoop.fs.Path(dst_str)
+        return src.getFileSystem(hadoop_conf).rename(src, dst)
 
     def rebuild(self, source_path: str = "") -> str:
         """Regenerate gold/metrics/tms's full history and promote it atomically.
@@ -89,9 +100,11 @@ class MetricsTMSETL(BaseETL):
         The replacement is built at a staging path first and only promoted
         (staged table moved onto the live path) after the source reads,
         aggregation and write all succeed — a failure at any step leaves the
-        current live table untouched and serving. Intended as a one-time
-        deployment step. Safe to re-run: the table is always fully regenerated
-        from its upstream gold tables.
+        current live table untouched and serving. During promotion the live
+        table is moved aside to a backup rather than deleted, so a failed
+        promotion can be rolled back. Intended as a one-time deployment step.
+        Safe to re-run: the table is always fully regenerated from its upstream
+        gold tables.
         """
         staging_root = f"{self.metrics_root}__rebuild_staging"
         self._fs_delete(staging_root)  # clear any leftover from a failed run
@@ -111,13 +124,46 @@ class MetricsTMSETL(BaseETL):
         finally:
             self.metrics_root = live_root
 
-        # Build succeeded — promote: drop the old-key live table, move staging into place.
-        self._drop_existing_table()
-        jvm = self.spark._jvm
-        hadoop_conf = self.spark._jsc.hadoopConfiguration()
-        src = jvm.org.apache.hadoop.fs.Path(staging_root)
-        dst = jvm.org.apache.hadoop.fs.Path(live_root)
-        src.getFileSystem(hadoop_conf).rename(src, dst)
+        # Build succeeded — promote. The live table is moved aside to a backup
+        # rather than deleted, because S3A emulates directory renames as
+        # copy-then-delete: promotion can fail partway (return False or raise),
+        # and without a backup the live table would be lost.
+        backup_root = f"{live_root}__rebuild_backup"
+        self._fs_delete(backup_root)  # clear any leftover from a failed run
+
+        had_live = self._fs_exists(live_root)
+        if had_live and not self._fs_rename(live_root, backup_root):
+            raise RuntimeError(
+                f"[MetricsTMSETL] Could not move {live_root} aside to {backup_root}; "
+                f"staged rebuild left at {staging_root}"
+            )
+
+        try:
+            if not self._fs_rename(staging_root, live_root):
+                raise RuntimeError(
+                    f"[MetricsTMSETL] Promotion of {staging_root} to {live_root} "
+                    f"returned false"
+                )
+        except Exception as exc:
+            # Promotion failed partway — clear whatever landed and put the
+            # original table back so production keeps serving.
+            self._fs_delete(live_root)
+            if had_live:
+                try:
+                    restored = self._fs_rename(backup_root, live_root)
+                except Exception as restore_error:
+                    raise RuntimeError(
+                        f"[MetricsTMSETL] Promotion and rollback both failed; "
+                        f"live table backup preserved at {backup_root}"
+                    ) from restore_error
+                if not restored:
+                    raise RuntimeError(
+                        f"[MetricsTMSETL] Promotion and rollback both failed; "
+                        f"live table backup preserved at {backup_root}"
+                    ) from exc
+            raise
+
+        self._fs_delete(backup_root)
         print(f"[MetricsTMSETL] Promoted {staging_root} to {live_root}")
         return live_root
 

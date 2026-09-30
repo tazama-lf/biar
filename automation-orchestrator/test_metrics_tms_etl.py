@@ -319,9 +319,91 @@ def test_rebuild_promotes_staged_table_and_keeps_live_table_on_failure(
     assert (live_dir / "new_key_row.parquet").exists()  # new table is live
     assert not (live_dir / "stale_old_key_row.parquet").exists()  # old table gone
     assert etl.metrics_root == live_dir.as_uri()
+    assert not (tmp_path / "gold" / "metrics" / "tms__rebuild_backup").exists()
 
 
-def test_drop_existing_table_is_a_noop_when_table_missing(spark, tmp_path):
-    # rebuild() must be safe to re-run once the table has already been dropped.
+def test_rebuild_rolls_back_live_table_when_promotion_fails(
+    spark, tmp_path, monkeypatch
+):
+    # S3A does directory renames as copy-then-delete, so promotion can fail
+    # partway. The live table must be restored from the backup rather than
+    # lost (CodeRabbit, PR #186).
     etl = MetricsTMSETL(spark, warehouse_root=tmp_path.as_uri())
-    etl._drop_existing_table()  # must not raise when gold/metrics/tms is absent
+    live_dir = tmp_path / "gold" / "metrics" / "tms"
+    staging_dir = tmp_path / "gold" / "metrics" / "tms__rebuild_staging"
+    backup_dir = tmp_path / "gold" / "metrics" / "tms__rebuild_backup"
+    live_dir.mkdir(parents=True)
+    (live_dir / "stale_old_key_row.parquet").write_text("original live row")
+
+    def working_gold():
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        (staging_dir / "new_key_row.parquet").write_text("staged row")
+        return etl.metrics_root
+
+    monkeypatch.setattr(etl, "gold", working_gold)
+
+    # Live table moves aside fine, but moving staging into place fails
+    # partway (leaving a partial file at the live path, as an S3A copy-then-
+    # delete can).
+    real_rename = etl._fs_rename
+
+    def flaky_rename(src, dst):
+        if src.endswith("tms__rebuild_staging"):
+            live_dir.mkdir(parents=True, exist_ok=True)
+            (live_dir / "partial_row.parquet").write_text("partial promotion")
+            return False
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(etl, "_fs_rename", flaky_rename)
+
+    with pytest.raises(RuntimeError, match="returned false"):
+        etl.rebuild("ignored-source-path")
+
+    # Original table restored, partial promotion cleared, backup consumed.
+    assert (live_dir / "stale_old_key_row.parquet").exists()
+    assert not (live_dir / "partial_row.parquet").exists()
+    assert not backup_dir.exists()
+    # Staging is intentionally left in place; the next rebuild run wipes it.
+    assert staging_dir.exists()
+
+
+def test_rebuild_keeps_backup_when_rollback_also_fails(spark, tmp_path, monkeypatch):
+    # If promotion AND the restore both fail, the backup must be left in place
+    # so the live data is still recoverable, and the caller must be told where.
+    etl = MetricsTMSETL(spark, warehouse_root=tmp_path.as_uri())
+    live_dir = tmp_path / "gold" / "metrics" / "tms"
+    staging_dir = tmp_path / "gold" / "metrics" / "tms__rebuild_staging"
+    backup_dir = tmp_path / "gold" / "metrics" / "tms__rebuild_backup"
+    live_dir.mkdir(parents=True)
+    (live_dir / "stale_old_key_row.parquet").write_text("original live row")
+
+    def working_gold():
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        (staging_dir / "new_key_row.parquet").write_text("staged row")
+        return etl.metrics_root
+
+    monkeypatch.setattr(etl, "gold", working_gold)
+
+    real_rename = etl._fs_rename
+
+    def broken_rename(src, dst):
+        if src.endswith("tms__rebuild_staging"):
+            return False  # promotion fails
+        if src.endswith("tms__rebuild_backup"):
+            return False  # restore also fails -> backup must stay
+        return real_rename(src, dst)  # live -> backup really moves
+
+    monkeypatch.setattr(etl, "_fs_rename", broken_rename)
+
+    with pytest.raises(RuntimeError, match="backup preserved"):
+        etl.rebuild("ignored-source-path")
+
+    # Backup survives for manual recovery.
+    assert backup_dir.exists()
+    assert (backup_dir / "stale_old_key_row.parquet").exists()
+
+
+def test_fs_delete_is_a_noop_when_path_missing(spark, tmp_path):
+    # rebuild() must be safe to re-run when its staging/backup paths are absent.
+    etl = MetricsTMSETL(spark, warehouse_root=tmp_path.as_uri())
+    etl._fs_delete(f"{etl.metrics_root}__rebuild_staging")  # must not raise

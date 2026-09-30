@@ -23,8 +23,10 @@ it is a derived aggregate and can be regenerated from ``gold/transactions`` +
 
 The rebuild is failure-safe: the replacement is built at
 ``gold/metrics/tms__rebuild_staging`` and only promoted onto the live path
-after the source reads, aggregation and write all succeed. If anything fails,
-the current live table is left untouched and still serving.
+after the source reads, aggregation and write all succeed. During promotion the
+live table is moved aside to ``gold/metrics/tms__rebuild_backup`` rather than
+deleted, so a failed promotion (S3A renames are copy-then-delete and can fail
+partway) is rolled back and the live table keeps serving.
 
 Usage
 -----
