@@ -12,9 +12,10 @@ This ETL intentionally does not read or derive anything from payment message
 tables. The original Ozone column names are preserved across the transaction
 layers.
 
-Gold adds debtor_entity_id / creditor_entity_id, resolved through the TMS
-account hierarchy (account -> gold/account_holder -> gold/entity). The debtor
-and creditor accounts depend on the message type: pacs.008 records carry
+Gold adds debtor_account_id / creditor_account_id and debtor_entity_id /
+creditor_entity_id, the latter resolved through the TMS account hierarchy
+(account -> gold/account_holder -> gold/entity). The debtor and creditor
+accounts depend on the message type: pacs.008 records carry
 source = debtor account, destination = creditor account, while pacs.002
 records carry them reversed (source = creditor, destination = debtor).
 """
@@ -91,7 +92,8 @@ class TransactionsETL(BaseETL):
         entity: DataFrame | None,
     ) -> DataFrame:
         """
-        Add debtor_entity_id / creditor_entity_id to *tx*.
+        Add debtor_account_id / creditor_account_id and debtor_entity_id /
+        creditor_entity_id to *tx*.
 
         account -> account_holder (counterparty_id = holding entity) -> entity.
         Left joins only: every transaction row is preserved, with null ids
@@ -101,8 +103,8 @@ class TransactionsETL(BaseETL):
         is_pacs002 = F.lower(F.coalesce(F.col("txtp"), F.lit(""))).startswith("pacs.002")
         tx = (
             tx
-            .withColumn("_dbtr_acct", F.when(is_pacs002, F.col("destination")).otherwise(F.col("source")))
-            .withColumn("_cdtr_acct", F.when(is_pacs002, F.col("source")).otherwise(F.col("destination")))
+            .withColumn("debtor_account_id", F.when(is_pacs002, F.col("destination")).otherwise(F.col("source")))
+            .withColumn("creditor_account_id", F.when(is_pacs002, F.col("source")).otherwise(F.col("destination")))
         )
 
         if account_holder is None or entity is None:
@@ -110,7 +112,6 @@ class TransactionsETL(BaseETL):
                 tx
                 .withColumn("debtor_entity_id", F.lit(None).cast("string"))
                 .withColumn("creditor_entity_id", F.lit(None).cast("string"))
-                .drop("_dbtr_acct", "_cdtr_acct")
             )
 
         w = Window.partitionBy("tenant_id", "account_id").orderBy(F.col("event_ts").desc_nulls_last())
@@ -136,7 +137,7 @@ class TransactionsETL(BaseETL):
             )
         )
 
-        for acct_col, out_col in (("_dbtr_acct", "debtor_entity_id"), ("_cdtr_acct", "creditor_entity_id")):
+        for acct_col, out_col in (("debtor_account_id", "debtor_entity_id"), ("creditor_account_id", "creditor_entity_id")):
             r = resolved.select(
                 F.col("_h_tenant").alias(f"_{out_col}_tenant"),
                 F.col("_h_account").alias(f"_{out_col}_account"),
@@ -149,7 +150,7 @@ class TransactionsETL(BaseETL):
                 "left",
             ).drop(f"_{out_col}_account", f"_{out_col}_tenant")
 
-        return tx.drop("_dbtr_acct", "_cdtr_acct")
+        return tx
 
     # ------------------------------------------------------------------
     # Bronze
@@ -277,6 +278,8 @@ class TransactionsETL(BaseETL):
                 F.col("tenantid").cast("string").alias("tenantid"),
                 F.col("txsts").cast("string").alias("txsts"),
                 F.col("txtp").cast("string").alias("txtp"),
+                F.col("debtor_account_id").cast("string").alias("debtor_account_id"),
+                F.col("creditor_account_id").cast("string").alias("creditor_account_id"),
                 F.col("debtor_entity_id").cast("string").alias("debtor_entity_id"),
                 F.col("creditor_entity_id").cast("string").alias("creditor_entity_id"),
                 F.col("event_ts").cast("timestamp").alias("event_ts"),

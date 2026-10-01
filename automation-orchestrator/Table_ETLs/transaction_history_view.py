@@ -11,9 +11,10 @@ class TransactionHistoryViewETL(BaseETL):
     """
     Transaction History View builder.
 
-    Reads bronze/transactions, joins PACS gold enrichment, joins optional
-    alerts/cases/tasks, expands to entity level, and writes event +
-    day/week/month/year aggregate rows to Hudi.
+    Reads gold/transactions (sourced from event_history.transaction), bridges
+    party display names from gold/pacs008, joins optional alerts/cases/tasks,
+    expands to entity level, and writes event + day/week/month/year
+    aggregate rows to Hudi.
 
     Uses transaction_id (TxTp||endToEndId) as the primary key.
     """
@@ -22,9 +23,8 @@ class TransactionHistoryViewETL(BaseETL):
         super().__init__(spark, warehouse_root)
         self.views_root = f"{self.warehouse_root}/views"
         self.view_path = f"{self.views_root}/vw_transaction_history"
-        self.transactions_bronze_path = f"{self.warehouse_root}/bronze/transactions"
+        self.transactions_gold_path = f"{self.warehouse_root}/gold/transactions"
         self.pacs008_gold_path = f"{self.warehouse_root}/gold/pacs008"
-        self.pacs002_gold_path = f"{self.warehouse_root}/gold/pacs002"
 
     @property
     def bronze_path(self) -> str:
@@ -52,77 +52,42 @@ class TransactionHistoryViewETL(BaseETL):
         except Exception:
             return None
 
-    @staticmethod
-    def _event_ts(col_name: str):
-        """Parse the ISO timestamp emitted by Ozone event history."""
-        return F.to_timestamp(F.regexp_replace(F.col(col_name).cast("string"), "Z$", ""))
-
-    @staticmethod
-    def _first_available(df: DataFrame, *names: str):
-        """Return the first available column from the transaction table."""
-        cols = [F.col(name) for name in names if name in df.columns]
-        if cols:
-            return F.coalesce(*cols)
-        return F.lit(None)
-
     def _extract_base_from_tables(self, tx: DataFrame) -> DataFrame:
-        """Build the base transaction frame from transactions plus PACS gold joins."""
+        """Build the base transaction frame from gold/transactions.
+
+        Account and entity ids, amount and currency come from the TMS
+        record. Party display names are not stored by TMS, so they are
+        bridged from gold/pacs008 on (end_to_end_id, tenant) until Gold-layer
+        enrichment lands (#110 Req 6).
+        """
         base_tx = (
             tx
-            .withColumn("view_endtoendid", self._first_available(tx, "endtoendid", "raw_history_endtoendid", "endToEndId").cast("string"))
-            .withColumn("view_tenantid", self._first_available(tx, "tenantid", "raw_history_tenantid", "tenantId").cast("string"))
-            .withColumn("view_txtp", self._first_available(tx, "txtp", "raw_history_txtp", "tx_type").cast("string"))
-            .withColumn("view_msgid", self._first_available(tx, "msgid", "raw_history_msgid", "tx_msg_id").cast("string"))
-            .withColumn("view_credttm", self._first_available(tx, "credttm", "raw_history_credttm").cast("string"))
-            .withColumn("view_amt", self._first_available(tx, "amt", "raw_history_amt").cast("double"))
-            .withColumn("view_ccy", self._first_available(tx, "ccy", "raw_history_ccy").cast("string"))
-            .withColumn("end_to_end_id", F.col("view_endtoendid"))
-            .withColumn("tenant_id", F.col("view_tenantid"))
-            .withColumn("tx_type", F.col("view_txtp"))
-            .withColumn("tx_msg_id", F.col("view_msgid"))
-            .withColumn("event_ts", F.coalesce(self._first_available(tx, "event_ts").cast("timestamp"), self._event_ts("view_credttm")))
-            .withColumn("event_date", F.to_date("event_ts"))
-            .withColumn("event_amount", F.col("view_amt"))
-            .withColumn("event_ccy", F.col("view_ccy"))
+            .withColumn("end_to_end_id", F.col("endtoendid").cast("string"))
+            .withColumn("tenant_id", F.col("tenantid").cast("string"))
         )
 
         p8 = self._safe_load(
             self.pacs008_gold_path,
             select_expr=[
                 F.col("end_to_end_id").cast("string").alias("p8_end_to_end_id"),
+                F.col("tx_tenant_id").cast("string").alias("p8_tenant_id"),
                 F.col("dbtr_name").cast("string").alias("p8_dbtr_name"),
-                F.col("dbtr_id").cast("string").alias("p8_dbtr_id"),
                 F.col("cdtr_name").cast("string").alias("p8_cdtr_name"),
-                F.col("cdtr_id").cast("string").alias("p8_cdtr_id"),
-                F.coalesce(F.col("dbtr_acct_id"), F.col("dc_dbtr_acct_id"), F.col("debtor_account_id")).cast("string").alias("p8_dbtr_account_id"),
-                F.coalesce(F.col("cdtr_acct_id"), F.col("dc_cdtr_acct_id"), F.col("creditor_account_id")).cast("string").alias("p8_cdtr_account_id"),
-                F.coalesce(F.col("instd_amt"), F.col("dc_instd_amt")).cast("double").alias("p8_tx_amount"),
-                F.coalesce(F.col("instd_ccy"), F.col("dc_instd_ccy")).cast("string").alias("p8_tx_ccy"),
+                F.col("ingested_at_ts").cast("timestamp").alias("p8_ingested_at_ts"),
             ],
         )
 
         joined = base_tx
         if p8 is not None:
-            p8 = p8.dropDuplicates(["p8_end_to_end_id"])
-            joined = joined.join(p8, joined.end_to_end_id == p8.p8_end_to_end_id, "left")
+            w8 = Window.partitionBy("p8_tenant_id", "p8_end_to_end_id").orderBy(F.col("p8_ingested_at_ts").desc_nulls_last())
+            p8 = p8.withColumn("_rn", F.row_number().over(w8)).filter("_rn = 1").drop("_rn", "p8_ingested_at_ts")
+            joined = joined.join(
+                p8,
+                (joined.end_to_end_id == p8.p8_end_to_end_id) & (joined.tenant_id == p8.p8_tenant_id),
+                "left",
+            )
 
-        joined = self.ensure_columns(
-            joined,
-            {
-                "p8_dbtr_name": "string",
-                "p8_dbtr_id": "string",
-                "p8_cdtr_name": "string",
-                "p8_cdtr_id": "string",
-                "p8_dbtr_account_id": "string",
-                "p8_cdtr_account_id": "string",
-                "p8_tx_amount": "double",
-                "p8_tx_ccy": "string",
-            },
-        )
-
-        has_source = "source_file_path" in joined.columns
-        has_hash = "record_hash" in joined.columns
-        is_payment_tx = F.col("tx_type").isin(["pacs.008.001.10", "pain.001.001.11"])
+        joined = self.ensure_columns(joined, {"p8_dbtr_name": "string", "p8_cdtr_name": "string"})
 
         return (
             joined
@@ -130,241 +95,20 @@ class TransactionHistoryViewETL(BaseETL):
                 F.col("transaction_id").cast("string").alias("transaction_id"),
                 F.col("end_to_end_id").cast("string").alias("end_to_end_id"),
                 F.col("tenant_id").cast("string").alias("tenant_id"),
-                F.col("tx_type").cast("string").alias("tx_type"),
-                F.col("tx_msg_id").cast("string").alias("tx_msg_id"),
+                F.col("txtp").cast("string").alias("tx_type"),
+                F.col("msgid").cast("string").alias("tx_msg_id"),
                 F.col("event_ts").cast("timestamp").alias("event_ts"),
                 F.col("event_date").cast("date").alias("event_date"),
-                F.when(is_payment_tx, F.coalesce(F.col("event_amount"), F.col("p8_tx_amount")))
-                .otherwise(F.col("event_amount"))
-                .cast("double")
-                .alias("tx_amount"),
-                F.when(is_payment_tx, F.coalesce(F.col("event_ccy"), F.col("p8_tx_ccy")))
-                .otherwise(F.col("event_ccy"))
-                .cast("string")
-                .alias("tx_ccy"),
+                F.col("amt").cast("double").alias("tx_amount"),
+                F.col("ccy").cast("string").alias("tx_ccy"),
                 F.col("p8_dbtr_name").cast("string").alias("dbtr_name"),
-                F.col("p8_dbtr_id").cast("string").alias("dbtr_id"),
+                F.col("debtor_entity_id").cast("string").alias("dbtr_id"),
                 F.col("p8_cdtr_name").cast("string").alias("cdtr_name"),
-                F.col("p8_cdtr_id").cast("string").alias("cdtr_id"),
-                F.col("p8_dbtr_account_id").cast("string").alias("dbtr_account_id"),
-                F.col("p8_cdtr_account_id").cast("string").alias("cdtr_account_id"),
-                (
-                    F.col("source_file_path").cast("string")
-                    if has_source
-                    else F.lit(None).cast("string")
-                ).alias("source_file_path"),
-                (
-                    F.col("record_hash").cast("string")
-                    if has_hash
-                    else F.lit(None).cast("string")
-                ).alias("record_hash"),
-            )
-            .filter(F.col("event_ts").isNotNull())
-        )
-
-    def _resolve_json_column(self, df: DataFrame) -> DataFrame:
-        """Auto-detect and normalize the raw JSON payload column."""
-        candidates = [
-            "transactionData",
-            "transaction_data",
-            "transaction",
-            "payload",
-            "raw_payload",
-        ]
-        json_col = next((c for c in candidates if c in df.columns), None)
-        if json_col is None:
-            raise ValueError(
-                f"No raw JSON column found in bronze/transactions. "
-                f"Tried: {candidates}\nAvailable: {df.columns}"
-            )
-        print(f"[TransactionHistoryViewETL] Using JSON column: {json_col} → transaction_data")
-        return df.withColumn("transaction_data", F.col(json_col).cast("string"))
-
-    def _extract_base(self, df: DataFrame) -> DataFrame:
-        """Build the base transaction frame from parsed PACS JSON.
-
-        Supports PACS.008, PACS.002, and pain.001 with DataCache fallbacks.
-        Uses regex as ultimate fallback since DataCache key names are stable
-        even when nesting varies.
-        """
-        # Use bronze tx_type if present, else fall back to JSON extraction
-        tx_type = F.coalesce(F.col("tx_type"), F.get_json_object("transaction_data", "$.TxTp"))
-
-        # --- Regex helpers (work regardless of JSON nesting) ---
-        def _re(key, grp=1):
-            return F.regexp_extract("transaction_data", rf'"{key}"\s*:\s*"([^"]+)"', grp)
-        
-        def _re_num(key, grp=1):
-            return F.regexp_extract("transaction_data", rf'"{key}"\s*:\s*([0-9.]+)', grp)
-
-        # --- Message IDs & timestamps (get_json_object FIRST to avoid "" trap) ---
-        tx_msg_id = F.coalesce(
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.GrpHdr.MsgId"),
-            F.get_json_object("transaction_data", "$.FIToFIPmtSts.GrpHdr.MsgId"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.GrpHdr.MsgId"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.GrpHdr.MsgId"),
-            F.get_json_object("transaction_data", "$.DataCache.MsgId"),
-            _re("MsgId"),
-            _re("msgId"),
-        )
-        event_ts = F.to_timestamp(
-            F.coalesce(
-                F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.GrpHdr.CreDtTm"),
-                F.get_json_object("transaction_data", "$.FIToFIPmtSts.GrpHdr.CreDtTm"),
-                F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.GrpHdr.CreDtTm"),
-                F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.GrpHdr.CreDtTm"),
-                F.get_json_object("transaction_data", "$.DataCache.CreDtTm"),
-                F.get_json_object("transaction_data", "$.DataCache.creDtTm"),
-                _re("CreDtTm"),
-                _re("creDtTm"),
-            )
-        )
-        event_date = F.to_date(event_ts)
-
-        # --- Debtor / Creditor names ---
-        dbtr_name = F.coalesce(
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Nm"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Nm"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.Dbtr.Nm"),
-            _re("dbtrId"),
-            F.get_json_object("transaction_data", "$.DataCache.dbtrId"),
-        )
-        cdtr_name = F.coalesce(
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Nm"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Nm"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.CdtTrfTxInf.Cdtr.Nm"),
-            _re("cdtrId"),
-            F.get_json_object("transaction_data", "$.DataCache.cdtrId"),
-        )
-
-        # --- Debtor / Creditor IDs ---
-        dbtr_id = F.regexp_replace(
-            F.coalesce(
-                _re("dbtrId"),
-                F.get_json_object("transaction_data", "$.DataCache.dbtrId"),
-                F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Id.PrvtId.Othr[0].Id"),
-                F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Id.OrgId.Othr[0].Id"),
-                F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Id.PrvtId.Othr[0].Id"),
-                F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.Dbtr.Id.OrgId.Othr[0].Id"),
-                F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.Dbtr.Id.PrvtId.Othr[0].Id"),
-                F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.Dbtr.Id.OrgId.Othr[0].Id"),
-            ),
-            "TAZAMA_EID$", "",
-        )
-        cdtr_id = F.regexp_replace(
-            F.coalesce(
-                _re("cdtrId"),
-                F.get_json_object("transaction_data", "$.DataCache.cdtrId"),
-                F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Id.PrvtId.Othr[0].Id"),
-                F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Id.OrgId.Othr[0].Id"),
-                F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Id.PrvtId.Othr[0].Id"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.Cdtr.Id.OrgId.Othr[0].Id"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.CdtTrfTxInf.Cdtr.Id.PrvtId.Othr[0].Id"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.CdtTrfTxInf.Cdtr.Id.OrgId.Othr[0].Id"),
-            ),
-            "TAZAMA_EID$", "",
-        )
-
-        # --- Account IDs (PACS.008 FIRST to match transaction_detail) ---
-        dbtr_acct = F.coalesce(
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr[0].Id"),
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.IBAN"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.Othr[0].Id"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.DbtrAcct.Id.IBAN"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.DbtrAcct.Id.Othr[0].Id"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.DbtrAcct.Id.IBAN"),
-            F.get_json_object("transaction_data", "$.DataCache.dbtrAcctId"),
-            _re("dbtrAcctId"),
-        )
-        cdtr_acct = F.coalesce(
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr[0].Id"),
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.IBAN"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.Othr[0].Id"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.CdtrAcct.Id.IBAN"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.CdtTrfTxInf.CdtrAcct.Id.Othr[0].Id"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.CdtTrfTxInf.CdtrAcct.Id.IBAN"),
-            F.get_json_object("transaction_data", "$.DataCache.cdtrAcctId"),
-            _re("cdtrAcctId"),
-        )
-
-        # --- Amount & currency ---
-        tx_amount = F.coalesce(
-            _re_num("amt"),
-            F.get_json_object("transaction_data", "$.DataCache.instdAmt.amt"),
-            F.get_json_object("transaction_data", "$.DataCache.intrBkSttlmAmt.amt"),
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Amt"),
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.IntrBkSttlmAmt.Amt"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Amt"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.CdtTrfTxInf.Amt.InstdAmt.Amt"),
-        ).cast("double")
-        tx_ccy = F.coalesce(
-            _re("ccy"),
-            F.get_json_object("transaction_data", "$.DataCache.instdAmt.ccy"),
-            F.get_json_object("transaction_data", "$.DataCache.intrBkSttlmAmt.ccy"),
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Ccy"),
-            F.get_json_object("transaction_data", "$.FIToFICstmrCdtTrf.CdtTrfTxInf.IntrBkSttlmAmt.Ccy"),
-            F.get_json_object("transaction_data", "$.Document.FIToFICstmrCdtTrf.CdtTrfTxInf.InstdAmt.Amt.Ccy"),
-            F.get_json_object("transaction_data", "$.CstmrCdtTrfInitn.PmtInf.CdtTrfTxInf.Amt.InstdAmt.Ccy"),
-        )
-
-        has_source = "source_file_path" in df.columns
-        has_hash = "record_hash" in df.columns
-
-        base = (
-            df
-            .withColumn("tx_type", tx_type)
-            .withColumn("tx_msg_id", tx_msg_id)
-            .withColumn("event_ts", event_ts)
-            .withColumn("event_date", event_date)
-            .withColumn("tx_amount", tx_amount)
-            .withColumn("tx_ccy", tx_ccy)
-            .withColumn("dbtr_name", dbtr_name)
-            .withColumn("dbtr_id", dbtr_id)
-            .withColumn("cdtr_name", cdtr_name)
-            .withColumn("cdtr_id", cdtr_id)
-            .withColumn("dbtr_account_id", dbtr_acct)
-            .withColumn("cdtr_account_id", cdtr_acct)
-        )
-
-        stats = base.agg(
-            F.count("*").alias("total"),
-            F.sum(F.when(F.col("dbtr_id").isNotNull(), 1).otherwise(0)).alias("dbtr_id_ok"),
-            F.sum(F.when(F.col("cdtr_id").isNotNull(), 1).otherwise(0)).alias("cdtr_id_ok"),
-            F.sum(F.when(F.col("dbtr_account_id").isNotNull(), 1).otherwise(0)).alias("dbtr_acct_ok"),
-            F.sum(F.when(F.col("cdtr_account_id").isNotNull(), 1).otherwise(0)).alias("cdtr_acct_ok"),
-            F.sum(F.when(F.col("tx_amount").isNotNull(), 1).otherwise(0)).alias("amount_ok"),
-        ).collect()[0]
-        if stats["total"] > 0:
-            print(f"[TransactionHistoryViewETL] Extraction coverage out of {stats['total']} rows:")
-        
-        return (
-            base
-            .select(
-                F.col("transaction_id").cast("string").alias("transaction_id"),
-                F.col("end_to_end_id").cast("string").alias("end_to_end_id"),
-                F.col("tenant_id").cast("string").alias("tenant_id"),
-                F.col("tx_type").cast("string").alias("tx_type"),
-                F.col("tx_msg_id").cast("string").alias("tx_msg_id"),
-                F.col("event_ts").cast("timestamp").alias("event_ts"),
-                F.col("event_date").cast("date").alias("event_date"),
-                F.col("tx_amount").cast("double").alias("tx_amount"),
-                F.col("tx_ccy").cast("string").alias("tx_ccy"),
-                F.col("dbtr_name").cast("string").alias("dbtr_name"),
-                F.col("dbtr_id").cast("string").alias("dbtr_id"),
-                F.col("cdtr_name").cast("string").alias("cdtr_name"),
-                F.col("cdtr_id").cast("string").alias("cdtr_id"),
-                F.col("dbtr_account_id").cast("string").alias("dbtr_account_id"),
-                F.col("cdtr_account_id").cast("string").alias("cdtr_account_id"),
-                (
-                    F.col("source_file_path").cast("string")
-                    if has_source
-                    else F.lit(None).cast("string")
-                ).alias("source_file_path"),
-                (
-                    F.col("record_hash").cast("string")
-                    if has_hash
-                    else F.lit(None).cast("string")
-                ).alias("record_hash"),
+                F.col("creditor_entity_id").cast("string").alias("cdtr_id"),
+                F.col("debtor_account_id").cast("string").alias("dbtr_account_id"),
+                F.col("creditor_account_id").cast("string").alias("cdtr_account_id"),
+                F.col("source_file_path").cast("string").alias("source_file_path"),
+                F.col("record_hash").cast("string").alias("record_hash"),
             )
             .filter(F.col("event_ts").isNotNull())
         )
@@ -612,16 +356,16 @@ class TransactionHistoryViewETL(BaseETL):
 
     def bronze(self, source_path: str = "") -> str:
         """
-        Build vw_transaction_history from bronze/transactions.
+        Build vw_transaction_history from gold/transactions.
 
-        *source_path* is ignored (reads from warehouse bronze path).
+        *source_path* is ignored (reads from warehouse gold path).
         """
         print("[TransactionHistoryViewETL] Creating Transaction History View...")
 
-        # 1. Load bronze transactions
-        tx = self.spark.read.format("hudi").load(self.transactions_bronze_path)
+        # 1. Load gold transactions
+        tx = self.spark.read.format("hudi").load(self.transactions_gold_path)
 
-        # 2. Build base frame from Ozone transactions plus PACS gold enrichment
+        # 2. Build base frame from gold transactions plus pacs name bridge
         base = self._extract_base_from_tables(tx)
 
         # 5. Join flags
