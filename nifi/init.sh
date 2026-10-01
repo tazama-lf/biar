@@ -40,15 +40,23 @@ S3A_SECRET_KEY="${S3A_SECRET_KEY:-}"
 # Build the full parameter list (JSON fragments) from environment variables.
 # Sensitive parameters (pg_password, ozone keys) are stored encrypted by NiFi
 # and are never returned by the REST API once set.
+# Values are JSON-escaped with a sed pass because user-supplied secrets may
+# contain quotes or backslashes, and the runtime image (curlimages/curl) does
+# not ship jq.
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
 PARAM_FRAGMENTS=""
 add_param_fragment() {
   _name="$1"
   _value="$2"
   _sensitive="$3"
+  _escaped_value=$(json_escape "$_value")
   if [ -n "$PARAM_FRAGMENTS" ]; then
     PARAM_FRAGMENTS="$PARAM_FRAGMENTS,"
   fi
-  PARAM_FRAGMENTS="$PARAM_FRAGMENTS{\"parameter\":{\"name\":\"$_name\",\"value\":\"$_value\",\"sensitive\":$_sensitive}}"
+  PARAM_FRAGMENTS="$PARAM_FRAGMENTS{\"parameter\":{\"name\":\"$_name\",\"value\":\"$_escaped_value\",\"sensitive\":$_sensitive}}"
 }
 
 add_param_fragment "$PB_NAME" "$PB_BUCKET" "$PB_SENSITIVE_FALSE"
@@ -138,10 +146,11 @@ ensure_param() {
   if echo "$CONTEXT_BODY" | tr -d '\n' | grep -q "\"name\":\"$_name\""; then
     return 0
   fi
+  _escaped_value=$(json_escape "$_value")
   if [ -n "$UPDATED_PARAMETERS_JSON" ]; then
     UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON,"
   fi
-  UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON{\"parameter\":{\"name\":\"$_name\",\"value\":\"$_value\",\"sensitive\":$_sensitive}}"
+  UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON{\"parameter\":{\"name\":\"$_name\",\"value\":\"$_escaped_value\",\"sensitive\":$_sensitive}}"
   PARAMS_UPDATED=true
 }
 
@@ -377,9 +386,16 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_ENABLE_SERVICE
     ENABLE_ATTEMPT=1
 
     while [ "$ENABLE_ATTEMPT" -le "$ENABLE_RETRIES" ]; do
-      curl -s -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services" \
+      ENABLE_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services" \
         -H "Content-Type: application/json" \
-        -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"ENABLED\"}" >/dev/null
+        -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"ENABLED\"}")
+      ENABLE_HTTP_CODE=$(echo "$ENABLE_RESPONSE" | tail -n1)
+      ENABLE_BODY=$(echo "$ENABLE_RESPONSE" | sed '$d')
+
+      if [ "$ENABLE_HTTP_CODE" != "200" ]; then
+        echo "WARNING: enable request returned HTTP $ENABLE_HTTP_CODE (attempt $ENABLE_ATTEMPT/$ENABLE_RETRIES)"
+        echo "$ENABLE_BODY"
+      fi
 
       SERVICES_RESPONSE=$(curl -s "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services")
       NOT_ENABLED_COUNT=$(echo "$SERVICES_RESPONSE" \
