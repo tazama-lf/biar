@@ -143,6 +143,8 @@ nmap_gold_path          = f"{WAREHOUSE_ROOT}/gold/network_map"
 rules_gold_path         = f"{WAREHOUSE_ROOT}/gold/rule"
 conditions_gold_path    = f"{WAREHOUSE_ROOT}/gold/condition"
 pacs008_gold_path       = f"{WAREHOUSE_ROOT}/gold/pacs008"
+pacs002_gold_path       = f"{WAREHOUSE_ROOT}/gold/pacs002"
+account_gold_path       = f"{WAREHOUSE_ROOT}/gold/account"
 account_holder          = f"{WAREHOUSE_ROOT}/gold/account_holder"
 evaluation              = f"{WAREHOUSE_ROOT}/gold/evaluation"
 entity_gold_path       = f"{WAREHOUSE_ROOT}/gold/entity"
@@ -158,9 +160,11 @@ ALERT_NAV_ROOT                        = f"{VIEWS_ROOT}/alert_navigator"
 alerts_nav_header_path                = f"{ALERT_NAV_ROOT}/header"
 alerts_nav_typologies_path            = f"{ALERT_NAV_ROOT}/typologies_triggered"
 alerts_nav_rules_path                 = f"{ALERT_NAV_ROOT}/rules_triggered"
+alerts_nav_network_evaluated_path     = f"{ALERT_NAV_ROOT}/network_evaluated"
 tx_detail_view_path                   = f"{VIEWS_ROOT}/vw_transaction_detail"
 tx_history_view_path                  = f"{VIEWS_ROOT}/vw_transaction_history"
 conditions_view_path                  = f"{VIEWS_ROOT}/conditions_timeline"
+alert_history_view_path               = f"{VIEWS_ROOT}/alert_history"
 vw_tx_network_accounts_edges_path     = f"{VIEWS_ROOT}/vw_tx_network_accounts_edges"
 vw_tx_network_counterparties_edges_path = f"{VIEWS_ROOT}/vw_tx_network_counterparties_edges"
 vw_counterparty_account_links_path    = f"{VIEWS_ROOT}/vw_counterparty_account_links"
@@ -171,10 +175,12 @@ GOLD_PATHS = {
     "tasks":                           tasks_gold_path,
     "transactions":                    transactions_gold_path,
     "pacs008":                         pacs008_gold_path,
+    "pacs002":                         pacs002_gold_path,
     "network_map":                     nmap_gold_path,
     "rule":                            rules_gold_path,
     "typologies":                      typologies_gold_path,
     "conditions":                      conditions_gold_path,
+    "account":                         account_gold_path,
     "account_holder":                  account_holder,
     "evaluation":                      evaluation,
     "entities":                        entity_gold_path,
@@ -182,9 +188,11 @@ GOLD_PATHS = {
     "alert_navigator_header":          alerts_nav_header_path,
     "alert_navigator_typologies":      alerts_nav_typologies_path,
     "alert_navigator_rules":           alerts_nav_rules_path,
+    "alert_navigator_network_evaluated": alerts_nav_network_evaluated_path,
     "transaction_detail":              tx_detail_view_path,
     "transaction_history":             tx_history_view_path,
     "conditions_timeline":             conditions_view_path,
+    "alert_history":                   alert_history_view_path,
     "tx_network_accounts_edges":       vw_tx_network_accounts_edges_path,
     "tx_network_counterparties_edges": vw_tx_network_counterparties_edges_path,
     "counterparty_account_links":      vw_counterparty_account_links_path,
@@ -323,8 +331,14 @@ def _get_hudi_data_sync(
     if table_name not in GOLD_PATHS:
         raise ValueError(f"Table '{table_name}' not found in Gold registry")
 
-    spark = get_spark()
     path = GOLD_PATHS[table_name]
+    # Registered but not yet written by its ETL (e.g. gold/account before the
+    # first NiFi batch): report no data instead of a 500 from Spark.
+    if not os.path.isdir(path):
+        logger.warning(f"Path for table '{table_name}' not found: {path}")
+        return []
+
+    spark = get_spark()
     df = spark.read.format("hudi").load(path)
     valid_columns = set(df.columns)
 
