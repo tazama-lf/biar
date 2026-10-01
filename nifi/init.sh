@@ -2,7 +2,7 @@
 
 set -e
 
-BASE_URL="http://nifi:8088/nifi-api"
+BASE_URL="${NIFI_BASE_URL:-http://nifi:8088/nifi-api}"
 PB_SENSITIVE_FALSE="${PB_SENSITIVE_FALSE:-${PB_SENSITIVE:-false}}"
 
 echo "Waiting for NiFi API to be ready..."
@@ -28,6 +28,41 @@ fi
 
 echo "NiFi API is ready"
 
+CORE_PG_HOST="${CORE_PG_HOST:-}"
+CORE_PG_PORT="${CORE_PG_PORT:-15432}"
+CMS_PG_HOST="${CMS_PG_HOST:-}"
+CMS_PG_PORT="${CMS_PG_PORT:-15433}"
+PG_USER="${PG_USER:-postgres}"
+PG_PASSWORD="${PG_PASSWORD:-}"
+S3A_ACCESS_KEY="${S3A_ACCESS_KEY:-}"
+S3A_SECRET_KEY="${S3A_SECRET_KEY:-}"
+
+# Build the full parameter list (JSON fragments) from environment variables.
+# Sensitive parameters (pg_password, ozone keys) are stored encrypted by NiFi
+# and are never returned by the REST API once set.
+PARAM_FRAGMENTS=""
+add_param_fragment() {
+  _name="$1"
+  _value="$2"
+  _sensitive="$3"
+  if [ -n "$PARAM_FRAGMENTS" ]; then
+    PARAM_FRAGMENTS="$PARAM_FRAGMENTS,"
+  fi
+  PARAM_FRAGMENTS="$PARAM_FRAGMENTS{\"parameter\":{\"name\":\"$_name\",\"value\":\"$_value\",\"sensitive\":$_sensitive}}"
+}
+
+add_param_fragment "$PB_NAME" "$PB_BUCKET" "$PB_SENSITIVE_FALSE"
+add_param_fragment "$PB_HTTP_NAME" "$PB_HTTP_VALUE" "$PB_SENSITIVE_FALSE"
+add_param_fragment "$PB_OZONE_NAME" "$PB_OZONE_ENDPOINT" "$PB_SENSITIVE_FALSE"
+add_param_fragment "core_pg_host" "$CORE_PG_HOST" false
+add_param_fragment "core_pg_port" "$CORE_PG_PORT" false
+add_param_fragment "cms_pg_host" "$CMS_PG_HOST" false
+add_param_fragment "cms_pg_port" "$CMS_PG_PORT" false
+add_param_fragment "pg_user" "$PG_USER" false
+add_param_fragment "pg_password" "$PG_PASSWORD" true
+add_param_fragment "ozone_access_key" "$S3A_ACCESS_KEY" true
+add_param_fragment "ozone_secret_key" "$S3A_SECRET_KEY" true
+
 echo "Creating Parameter Context..."
 
 CREATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$BASE_URL/parameter-contexts" \
@@ -36,29 +71,7 @@ CREATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$BASE_URL/parameter-conte
     \"revision\": { \"version\": 0 },
     \"component\": {
       \"name\": \"$PB_CONTEXT_NAME\",
-      \"parameters\": [
-        {
-          \"parameter\": {
-            \"name\": \"$PB_NAME\",
-            \"value\": \"$PB_BUCKET\",
-            \"sensitive\": $PB_SENSITIVE_FALSE
-          }
-        },
-        {
-          \"parameter\": {
-            \"name\": \"$PB_HTTP_NAME\",
-            \"value\": \"$PB_HTTP_VALUE\",
-            \"sensitive\": $PB_SENSITIVE_FALSE
-          }
-        },
-        {
-          \"parameter\": {
-            \"name\": \"$PB_OZONE_NAME\",
-            \"value\": \"$PB_OZONE_ENDPOINT\",
-            \"sensitive\": $PB_SENSITIVE_FALSE
-          }
-        }
-      ]
+      \"parameters\": [ $PARAM_FRAGMENTS ]
     }
   }")
 
@@ -112,37 +125,37 @@ if [ "$CONTEXT_HTTP_CODE" != "200" ]; then
   exit 1
 fi
 
-CURRENT_PARAMETERS_JSON=$(echo "$CONTEXT_BODY" \
-  | tr -d '\n' \
-  | sed -n 's/.*"parameters":\[\(.*\)\],"inheritedParameterContexts".*/\1/p' \
-  | head -n 1)
-
-UPDATED_PARAMETERS_JSON="$CURRENT_PARAMETERS_JSON"
+UPDATED_PARAMETERS_JSON=""
 PARAMS_UPDATED=false
 
-if ! echo "$CONTEXT_BODY" | tr -d '\n' | grep -q "\"name\":\"$PB_NAME\""; then
+# Ensure every required parameter exists in the context. Sensitive values are
+# returned masked by NiFi, so existence is checked by name only, and only the
+# MISSING parameters are sent on update (omitted parameters keep their values).
+ensure_param() {
+  _name="$1"
+  _value="$2"
+  _sensitive="$3"
+  if echo "$CONTEXT_BODY" | tr -d '\n' | grep -q "\"name\":\"$_name\""; then
+    return 0
+  fi
   if [ -n "$UPDATED_PARAMETERS_JSON" ]; then
     UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON,"
   fi
-  UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON{\"parameter\":{\"name\":\"$PB_NAME\",\"value\":\"$PB_BUCKET\",\"sensitive\":$PB_SENSITIVE_FALSE}}"
+  UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON{\"parameter\":{\"name\":\"$_name\",\"value\":\"$_value\",\"sensitive\":$_sensitive}}"
   PARAMS_UPDATED=true
-fi
+}
 
-if ! echo "$CONTEXT_BODY" | tr -d '\n' | grep -q "\"name\":\"$PB_HTTP_NAME\""; then
-  if [ -n "$UPDATED_PARAMETERS_JSON" ]; then
-    UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON,"
-  fi
-  UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON{\"parameter\":{\"name\":\"$PB_HTTP_NAME\",\"value\":\"$PB_HTTP_VALUE\",\"sensitive\":$PB_SENSITIVE_FALSE}}"
-  PARAMS_UPDATED=true
-fi
-
-if ! echo "$CONTEXT_BODY" | tr -d '\n' | grep -q "\"name\":\"$PB_OZONE_NAME\""; then
-  if [ -n "$UPDATED_PARAMETERS_JSON" ]; then
-    UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON,"
-  fi
-  UPDATED_PARAMETERS_JSON="$UPDATED_PARAMETERS_JSON{\"parameter\":{\"name\":\"$PB_OZONE_NAME\",\"value\":\"$PB_OZONE_ENDPOINT\",\"sensitive\":$PB_SENSITIVE_FALSE}}"
-  PARAMS_UPDATED=true
-fi
+ensure_param "$PB_NAME" "$PB_BUCKET" "$PB_SENSITIVE_FALSE"
+ensure_param "$PB_HTTP_NAME" "$PB_HTTP_VALUE" "$PB_SENSITIVE_FALSE"
+ensure_param "$PB_OZONE_NAME" "$PB_OZONE_ENDPOINT" "$PB_SENSITIVE_FALSE"
+ensure_param "core_pg_host" "$CORE_PG_HOST" false
+ensure_param "core_pg_port" "$CORE_PG_PORT" false
+ensure_param "cms_pg_host" "$CMS_PG_HOST" false
+ensure_param "cms_pg_port" "$CMS_PG_PORT" false
+ensure_param "pg_user" "$PG_USER" false
+ensure_param "pg_password" "$PG_PASSWORD" true
+ensure_param "ozone_access_key" "$S3A_ACCESS_KEY" true
+ensure_param "ozone_secret_key" "$S3A_SECRET_KEY" true
 
 if [ "$PARAMS_UPDATED" = "true" ]; then
   CONTEXT_REVISION_VERSION=$(echo "$CONTEXT_BODY" \
@@ -159,6 +172,7 @@ if [ "$PARAMS_UPDATED" = "true" ]; then
     -H "Content-Type: application/json" \
     -d "{
       \"revision\": { \"version\": $CONTEXT_REVISION_VERSION },
+      \"id\": \"$PARAM_CONTEXT_ID\",
       \"component\": {
         \"id\": \"$PARAM_CONTEXT_ID\",
         \"parameters\": [ $UPDATED_PARAMETERS_JSON ]
@@ -238,6 +252,18 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
     exit 1
   fi
 
+  # Idempotency guard: if the target process group already has components
+  # (controller services / processors), the flow was imported before. Skip
+  # upload + instantiation so a re-run never duplicates the canvas.
+  EXISTING_SERVICES=$(curl -s "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services")
+  if echo "$EXISTING_SERVICES" | tr -d '\n' | grep -q '"controllerServices":\[{'; then
+    echo "Flow already present in process group $TEMPLATE_TARGET_PG_ID - skipping template import"
+    TEMPLATE_ALREADY_PRESENT=true
+  else
+    TEMPLATE_ALREADY_PRESENT=false
+  fi
+
+  if [ "$TEMPLATE_ALREADY_PRESENT" = "false" ]; then
   TEMPLATE_NAME=$(tr -d '\n' < "$TEMPLATE_FILE" | sed -n 's:.*<name>[[:space:]]*\([^<]*\)[[:space:]]*</name>.*:\1:p' | head -n 1)
   TEMPLATE_ID=""
 
@@ -303,6 +329,14 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
     fi
   fi
 
+  # Fallback: the upload endpoint may answer with XML instead of JSON.
+  if [ -z "$TEMPLATE_ID" ]; then
+    TEMPLATE_ID=$(echo "$UPLOAD_BODY" \
+      | tr -d '\n' \
+      | sed -n 's/.*<id>\([^<]*\)<\/id>.*/\1/p' \
+      | head -n 1)
+  fi
+
   if [ -z "$TEMPLATE_ID" ]; then
     echo "Unable to extract template ID from upload response"
     echo "$UPLOAD_BODY"
@@ -330,8 +364,46 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
   fi
 
   echo "Template imported and instantiated successfully"
+  fi
 else
   echo "Template import skipped (IMPORT_NIFI_TEMPLATE=false)"
+fi
+
+if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_ENABLE_SERVICES:-true}" = "true" ]; then
+    echo "Enabling controller services..."
+
+    ENABLE_RETRIES="${NIFI_ENABLE_RETRIES:-30}"
+    ENABLE_DELAY_SECONDS="${NIFI_ENABLE_DELAY_SECONDS:-5}"
+    ENABLE_ATTEMPT=1
+
+    while [ "$ENABLE_ATTEMPT" -le "$ENABLE_RETRIES" ]; do
+      curl -s -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services" \
+        -H "Content-Type: application/json" \
+        -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"ENABLED\"}" >/dev/null
+
+      SERVICES_RESPONSE=$(curl -s "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services")
+      NOT_ENABLED_COUNT=$(echo "$SERVICES_RESPONSE" \
+        | tr -d '\n' \
+        | sed 's/},{/}\n{/g' \
+        | grep -c '"state":"DISABLED"\|"state":"ENABLING"\|"state":"DISABLING"' || true)
+
+      if [ "$NOT_ENABLED_COUNT" = "0" ]; then
+        echo "All controller services are ENABLED"
+        break
+      fi
+
+      echo "Waiting for controller services to enable (attempt $ENABLE_ATTEMPT/$ENABLE_RETRIES, $NOT_ENABLED_COUNT pending)..."
+      ENABLE_ATTEMPT=$((ENABLE_ATTEMPT + 1))
+      sleep "$ENABLE_DELAY_SECONDS"
+    done
+
+    if [ "$ENABLE_ATTEMPT" -gt "$ENABLE_RETRIES" ]; then
+      echo "WARNING: not all controller services reached ENABLED after $ENABLE_RETRIES attempts"
+    fi
+
+    echo "Controller services enabled - start the flow from the NiFi UI when ready"
+else
+  echo "Controller service enabling skipped (NIFI_AUTO_ENABLE_SERVICES=false)"
 fi
 
 echo "Init script finished"
