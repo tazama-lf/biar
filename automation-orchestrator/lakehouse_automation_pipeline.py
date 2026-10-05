@@ -118,6 +118,7 @@ class FullETLOrchestrator:
         bucket: Optional[str] = None,
         object_key: Optional[str] = None,
         trigger_views: bool = False,
+        rebuild: bool = False,
     ) -> dict:
         """
         Execute the full ETL pipeline for the given table.
@@ -127,6 +128,13 @@ class FullETLOrchestrator:
         trigger_views : bool, default False
             If True, run the ViewsOrchestrator after the table ETL completes
             to build any views whose upstream dependencies are now available.
+        rebuild : bool, default False
+            Only valid for aggregation-only tables (e.g. ``metrics_tms``).
+            Drop the existing gold table and regenerate its full history from
+            the upstream gold tables instead of upserting into it. Required
+            when a table's Hudi record key changes: Hudi does not migrate the
+            ``_hoodie_record_key`` of rows that were already written, so the
+            old rows must be discarded and rebuilt.
         """
         raw_path, table, bucket, object_key, source_path = self._resolve_params(
             raw_path, db_name, table, bucket, object_key
@@ -142,7 +150,7 @@ class FullETLOrchestrator:
             print(f"Source Path: {source_path}")
 
         # 1. Run domain table ETL
-        etl_result = self._route_etl(table, source_path, db_name=db_name)
+        etl_result = self._route_etl(table, source_path, db_name=db_name, rebuild=rebuild)
         # 2. Optionally build views
         views_result = None
         if trigger_views:
@@ -245,12 +253,22 @@ class FullETLOrchestrator:
 
         return ""
 
-    def _route_etl(self, table: str, source_path: str, db_name: Optional[str] = None) -> str:
+    def _route_etl(self, table: str, source_path: str, db_name: Optional[str] = None, rebuild: bool = False) -> str:
         """Dispatch to the correct ETL class based on table name."""
         table = self._normalize_table_name(table)
 
         if table in self._ETL_REGISTRY:
-            self._ETL_REGISTRY[table](self.spark, self.warehouse_root).run(source_path)
+            etl = self._ETL_REGISTRY[table](self.spark, self.warehouse_root)
+            if rebuild:
+                if table not in self._AGGREGATION_ONLY_TABLES:
+                    raise ValueError(
+                        f"rebuild=True is only supported for aggregation-only tables "
+                        f"({', '.join(sorted(self._AGGREGATION_ONLY_TABLES))}); "
+                        f"got '{table}'."
+                    )
+                etl.rebuild(source_path)
+            else:
+                etl.run(source_path)
             return "All Done"
 
         # FALLBACK — unknown table → DynamicETL with db_name

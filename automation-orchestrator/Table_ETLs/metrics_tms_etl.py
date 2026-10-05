@@ -11,15 +11,20 @@ class MetricsTMSETL(BaseETL):
     """Pre-aggregate BIAR TMS metrics and persist to gold/metrics/tms as Hudi.
 
     Produces one combined metrics table partitioned by metric_year/metric_month/metric_date
-    and keyed by metric_year,metric_month,metric_date,metric_hour,metric_quarter,metric_granularity.
+    and keyed by metric_year,metric_month,metric_date,metric_hour,metric_quarter,
+    metric_granularity,tenant_id. Every row is scoped to a single tenant so the
+    lakehouse query API's tenant_id filter (and the notebooks' load_tenant_hudi()
+    helper) can enforce isolation on this table like every other gold table.
     """
 
     def __init__(self, spark: SparkSession, warehouse_root: str) -> None:
+        """Set the gold/metrics/tms output path under warehouse_root."""
         super().__init__(spark, warehouse_root)
         self.metrics_root = f"{self.warehouse_root}/gold/metrics/tms"
 
     @property
     def gold_path(self) -> str:
+        """Path to the gold/metrics/tms Hudi table."""
         return self.metrics_root
 
     def bronze(self, source_path: str) -> str:
@@ -31,8 +36,11 @@ class MetricsTMSETL(BaseETL):
         return self.metrics_root
 
     def run(self, source_path: str) -> str:
-        # source_path is a synthetic placeholder — this ETL has no source file,
-        # it reads gold/transactions and gold/evaluation directly.
+        """Run the full aggregation and write gold/metrics/tms.
+
+        source_path is a synthetic placeholder — this ETL has no source file,
+        it reads gold/transactions and gold/evaluation directly.
+        """
         print(
             f"[MetricsTMSETL] Aggregating from {self.warehouse_root}/gold/transactions "
             f"and {self.warehouse_root}/gold/evaluation"
@@ -41,7 +49,129 @@ class MetricsTMSETL(BaseETL):
         print("[MetricsTMSETL] ETL complete.")
         return result
 
+    def _fs_delete(self, path_str: str) -> None:
+        """Recursively delete *path_str* via the Hadoop FileSystem API, if present.
+
+        Uses the Hadoop FileSystem API (not ``shutil``) so the same code path
+        works for local ``file://`` warehouses and remote ``s3a://`` Ozone/S3
+        warehouses.
+        """
+        jvm = self.spark._jvm
+        hadoop_conf = self.spark._jsc.hadoopConfiguration()
+        path = jvm.org.apache.hadoop.fs.Path(path_str)
+        fs = path.getFileSystem(hadoop_conf)
+        if fs.exists(path):
+            print(f"[MetricsTMSETL] Deleting {path_str}")
+            fs.delete(path, True)
+
+    def _fs_exists(self, path_str: str) -> bool:
+        """Return whether *path_str* exists, via the Hadoop FileSystem API."""
+        jvm = self.spark._jvm
+        hadoop_conf = self.spark._jsc.hadoopConfiguration()
+        return jvm.org.apache.hadoop.fs.Path(path_str).getFileSystem(hadoop_conf).exists(
+            jvm.org.apache.hadoop.fs.Path(path_str)
+        )
+
+    def _fs_rename(self, src_str: str, dst_str: str) -> bool:
+        """Move *src_str* to *dst_str*, returning the ``FileSystem.rename()`` result.
+
+        Callers must check the return value: S3A emulates a directory rename as a
+        copy-then-delete, so it is **not** atomic and can fail partway (returning
+        ``False`` or raising), leaving a partial state.
+        """
+        jvm = self.spark._jvm
+        hadoop_conf = self.spark._jsc.hadoopConfiguration()
+        src = jvm.org.apache.hadoop.fs.Path(src_str)
+        dst = jvm.org.apache.hadoop.fs.Path(dst_str)
+        return src.getFileSystem(hadoop_conf).rename(src, dst)
+
+    def rebuild(self, source_path: str = "") -> str:
+        """Regenerate gold/metrics/tms's full history and promote it atomically.
+
+        gold/metrics/tms is a derived aggregate — fully reproducible from
+        gold/transactions + gold/evaluation — so regenerating it is the safe
+        way to migrate the table onto the tenant-aware record key added in
+        #185. Hudi materialises ``_hoodie_record_key`` at write time and does
+        NOT migrate it when ``hoodie.datasource.write.recordkey.field`` changes,
+        so rows written under the old six-field key would otherwise keep a NULL
+        ``tenant_id`` and stay invisible to the tenant-scoped read paths forever,
+        sitting alongside fresh rows written under the new seven-field key.
+
+        The replacement is built at a staging path first and only promoted
+        (staged table moved onto the live path) after the source reads,
+        aggregation and write all succeed — a failure at any step leaves the
+        current live table untouched and serving. During promotion the live
+        table is moved aside to a backup rather than deleted, so a failed
+        promotion triggers a rollback that restores the live table. Rollback
+        is attempted, not guaranteed: if the restore itself fails, the backup
+        is left in place and the error names its path, so recovery is manual
+        but the data is never lost. Intended as a one-time deployment step.
+        Safe to re-run: the table is always fully regenerated from its upstream
+        gold tables.
+        """
+        staging_root = f"{self.metrics_root}__rebuild_staging"
+        self._fs_delete(staging_root)  # clear any leftover from a failed run
+
+        live_root = self.metrics_root
+        try:
+            print(
+                f"[MetricsTMSETL] Rebuilding into staging path {staging_root} "
+                f"(live table at {live_root} stays untouched until promotion)"
+            )
+            self.metrics_root = staging_root
+            self.run(source_path)
+        except Exception:
+            # Build failed — keep the live table, drop only the partial staging table.
+            self._fs_delete(staging_root)
+            raise
+        finally:
+            self.metrics_root = live_root
+
+        # Build succeeded — promote. The live table is moved aside to a backup
+        # rather than deleted, because S3A emulates directory renames as
+        # copy-then-delete: promotion can fail partway (return False or raise),
+        # and without a backup the live table would be lost.
+        backup_root = f"{live_root}__rebuild_backup"
+        self._fs_delete(backup_root)  # clear any leftover from a failed run
+
+        had_live = self._fs_exists(live_root)
+        if had_live and not self._fs_rename(live_root, backup_root):
+            raise RuntimeError(
+                f"[MetricsTMSETL] Could not move {live_root} aside to {backup_root}; "
+                f"staged rebuild left at {staging_root}"
+            )
+
+        try:
+            if not self._fs_rename(staging_root, live_root):
+                raise RuntimeError(
+                    f"[MetricsTMSETL] Promotion of {staging_root} to {live_root} "
+                    f"returned false"
+                )
+        except Exception as exc:
+            # Promotion failed partway — clear whatever landed and put the
+            # original table back so production keeps serving.
+            self._fs_delete(live_root)
+            if had_live:
+                try:
+                    restored = self._fs_rename(backup_root, live_root)
+                except Exception as restore_error:
+                    raise RuntimeError(
+                        f"[MetricsTMSETL] Promotion and rollback both failed; "
+                        f"live table backup preserved at {backup_root}"
+                    ) from restore_error
+                if not restored:
+                    raise RuntimeError(
+                        f"[MetricsTMSETL] Promotion and rollback both failed; "
+                        f"live table backup preserved at {backup_root}"
+                    ) from exc
+            raise
+
+        self._fs_delete(backup_root)
+        print(f"[MetricsTMSETL] Promoted {staging_root} to {live_root}")
+        return live_root
+
     def _time_dims(self, ts_col: str) -> List[F.Column]:
+        """Derive metric_date/hour/month/quarter/year columns from a timestamp column."""
         return [
             F.to_date(F.col(ts_col)).alias("metric_date"),
             F.hour(F.col(ts_col)).alias("metric_hour"),
@@ -51,11 +181,12 @@ class MetricsTMSETL(BaseETL):
         ]
 
     def _aggregate_received(self, tx: DataFrame) -> DataFrame:
+        """Return hourly, per-tenant counts of received pacs.008 transactions."""
         # Filter pacs.008 and valid event_ts
         received = (
             tx.filter(F.col("tx_type") == "pacs.008.001.10")
             .filter(F.col("event_ts").isNotNull())
-            .select("end_to_end_id", "event_ts")
+            .select("end_to_end_id", "event_ts", "tenant_id")
         )
 
         agg = (
@@ -70,6 +201,7 @@ class MetricsTMSETL(BaseETL):
                 "metric_date",
                 "metric_hour",
                 "metric_quarter",
+                "tenant_id",
             )
             .agg(F.countDistinct("end_to_end_id").alias("transactions_received"))
         )
@@ -96,7 +228,7 @@ class MetricsTMSETL(BaseETL):
         evaluated = (
             eval_df.filter(F.col("tx_msg_id").isNotNull())
             .filter(F.col("event_ts").isNotNull())
-            .select("tx_msg_id", "event_ts")
+            .select("tx_msg_id", "event_ts", "tenant_id")
             .withColumn("metric_date", F.to_date("event_ts"))
             .withColumn("metric_hour", F.hour("event_ts"))
             .withColumn("metric_month", F.month("event_ts"))
@@ -110,6 +242,7 @@ class MetricsTMSETL(BaseETL):
             "metric_date",
             "metric_hour",
             "metric_quarter",
+            "tenant_id",
         ).agg(F.countDistinct("tx_msg_id").alias("transactions_evaluated"))
 
         # Raw per-eval latency rows with both timestamps present
@@ -137,6 +270,7 @@ class MetricsTMSETL(BaseETL):
                 "metric_date",
                 "metric_hour",
                 "metric_quarter",
+                "tenant_id",
                 "e2e_eval_time_ms",
             )
         )
@@ -154,6 +288,7 @@ class MetricsTMSETL(BaseETL):
             "metric_date",
             "metric_hour",
             "metric_quarter",
+            "tenant_id",
         ).agg(
             F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
             F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -167,6 +302,7 @@ class MetricsTMSETL(BaseETL):
             "metric_date",
             "metric_hour",
             "metric_quarter",
+            "tenant_id",
         ).agg(F.count("e2e_eval_time_ms").alias("dq_excluded_count"))
 
         # evaluation_count over ALL rows with both timestamps present (valid + excluded),
@@ -177,6 +313,7 @@ class MetricsTMSETL(BaseETL):
             "metric_date",
             "metric_hour",
             "metric_quarter",
+            "tenant_id",
         ).agg(F.count("e2e_eval_time_ms").alias("evaluation_count"))
 
         return (
@@ -232,6 +369,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_date",
                     "metric_hour",
                     "metric_quarter",
+                    "tenant_id",
                 ],
                 how="full",
             )
@@ -243,6 +381,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_date",
                     "metric_hour",
                     "metric_quarter",
+                    "tenant_id",
                 ],
                 how="full",
             )
@@ -254,6 +393,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_date",
                     "metric_hour",
                     "metric_quarter",
+                    "tenant_id",
                 ],
                 how="full",
             )
@@ -265,6 +405,7 @@ class MetricsTMSETL(BaseETL):
                     "metric_date",
                     "metric_hour",
                     "metric_quarter",
+                    "tenant_id",
                 ],
                 how="full",
             )
@@ -284,7 +425,7 @@ class MetricsTMSETL(BaseETL):
         # Daily rollups: counts by summing hourly counts, latency from raw rows
         daily_counts = (
             hourly.groupBy(
-                "metric_year", "metric_month", "metric_date", "metric_quarter"
+                "metric_year", "metric_month", "metric_date", "metric_quarter", "tenant_id"
             )
             .agg(
                 F.sum("transactions_received").alias("transactions_received"),
@@ -298,7 +439,7 @@ class MetricsTMSETL(BaseETL):
         daily_counts = self._with_rate(daily_counts)
 
         daily_latency = (
-            latency_valid.groupBy("metric_year", "metric_month", "metric_date")
+            latency_valid.groupBy("metric_year", "metric_month", "metric_date", "tenant_id")
             .agg(
                 F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
                 F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -308,12 +449,14 @@ class MetricsTMSETL(BaseETL):
         )
 
         daily = daily_counts.join(
-            daily_latency, on=["metric_year", "metric_month", "metric_date"], how="left"
+            daily_latency,
+            on=["metric_year", "metric_month", "metric_date", "tenant_id"],
+            how="left",
         ).withColumn("metric_quarter", F.quarter(F.col("metric_date")))
 
         # Monthly rollups
         monthly_counts = (
-            hourly.groupBy("metric_year", "metric_month", "metric_quarter")
+            hourly.groupBy("metric_year", "metric_month", "metric_quarter", "tenant_id")
             .agg(
                 F.sum("transactions_received").alias("transactions_received"),
                 F.sum("transactions_evaluated").alias("transactions_evaluated"),
@@ -327,7 +470,7 @@ class MetricsTMSETL(BaseETL):
         monthly_counts = self._with_rate(monthly_counts)
 
         monthly_latency = (
-            latency_valid.groupBy("metric_year", "metric_month")
+            latency_valid.groupBy("metric_year", "metric_month", "tenant_id")
             .agg(
                 F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
                 F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -337,12 +480,12 @@ class MetricsTMSETL(BaseETL):
         )
 
         monthly = monthly_counts.join(
-            monthly_latency, on=["metric_year", "metric_month"], how="left"
+            monthly_latency, on=["metric_year", "metric_month", "tenant_id"], how="left"
         )
 
         # Quarterly rollups
         quarterly_counts = (
-            hourly.groupBy("metric_year", "metric_quarter")
+            hourly.groupBy("metric_year", "metric_quarter", "tenant_id")
             .agg(
                 F.sum("transactions_received").alias("transactions_received"),
                 F.sum("transactions_evaluated").alias("transactions_evaluated"),
@@ -357,7 +500,7 @@ class MetricsTMSETL(BaseETL):
         quarterly_counts = self._with_rate(quarterly_counts)
 
         quarterly_latency = (
-            latency_valid.groupBy("metric_year", "metric_quarter")
+            latency_valid.groupBy("metric_year", "metric_quarter", "tenant_id")
             .agg(
                 F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
                 F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -367,12 +510,12 @@ class MetricsTMSETL(BaseETL):
         )
 
         quarterly = quarterly_counts.join(
-            quarterly_latency, on=["metric_year", "metric_quarter"], how="left"
+            quarterly_latency, on=["metric_year", "metric_quarter", "tenant_id"], how="left"
         )
 
         # Annual rollups
         annual_counts = (
-            hourly.groupBy("metric_year")
+            hourly.groupBy("metric_year", "tenant_id")
             .agg(
                 F.sum("transactions_received").alias("transactions_received"),
                 F.sum("transactions_evaluated").alias("transactions_evaluated"),
@@ -388,7 +531,7 @@ class MetricsTMSETL(BaseETL):
         annual_counts = self._with_rate(annual_counts)
 
         annual_latency = (
-            latency_valid.groupBy("metric_year")
+            latency_valid.groupBy("metric_year", "tenant_id")
             .agg(
                 F.avg("e2e_eval_time_ms").alias("avg_evaluation_time_ms"),
                 F.expr("percentile_approx(e2e_eval_time_ms, 0.95, 200)").alias(
@@ -397,7 +540,9 @@ class MetricsTMSETL(BaseETL):
             )
         )
 
-        annual = annual_counts.join(annual_latency, on=["metric_year"], how="left")
+        annual = annual_counts.join(
+            annual_latency, on=["metric_year", "tenant_id"], how="left"
+        )
 
         # Union all granularities
         all_frames = [hourly, daily, monthly, quarterly, annual]
@@ -410,6 +555,7 @@ class MetricsTMSETL(BaseETL):
 
         # Ensure canonical column order and presence
         expected_cols = [
+            "tenant_id",
             "metric_year",
             "metric_month",
             "metric_date",
@@ -426,6 +572,7 @@ class MetricsTMSETL(BaseETL):
         ]
 
         col_types = {
+            "tenant_id": "string",
             "metric_year": "int",
             "metric_month": "int",
             "metric_date": "date",
@@ -451,6 +598,7 @@ class MetricsTMSETL(BaseETL):
         normalize_transactions_for_dashboard()."""
 
         def pick(*names, cast_type="string"):
+            """Return the first matching column among names, cast to cast_type, or a typed null."""
             for name in names:
                 if name in tx.columns:
                     return F.col(name).cast(cast_type)
@@ -460,9 +608,11 @@ class MetricsTMSETL(BaseETL):
             pick("tx_type", "txtp").alias("tx_type"),
             pick("end_to_end_id", "endtoendid").alias("end_to_end_id"),
             pick("event_ts", cast_type="timestamp").alias("event_ts"),
+            pick("tenant_id", "tenantid").alias("tenant_id"),
         )
 
     def gold(self) -> str:
+        """Aggregate gold/transactions and gold/evaluation and write gold/metrics/tms."""
         # Read source gold tables
         tx_path = f"{self.warehouse_root}/gold/transactions"
         eval_path = f"{self.warehouse_root}/gold/evaluation"
@@ -495,7 +645,7 @@ class MetricsTMSETL(BaseETL):
 
         # Hudi writer options
         # Use a composite record key that includes quarter and granularity to avoid collisions
-        record_key = "metric_year,metric_month,metric_date,metric_hour,metric_quarter,metric_granularity"
+        record_key = "metric_year,metric_month,metric_date,metric_hour,metric_quarter,metric_granularity,tenant_id"
         partition = "metric_year,metric_month,metric_date"
         opts = self.hudi_opts(
             table_name="metrics_tms",
@@ -505,7 +655,7 @@ class MetricsTMSETL(BaseETL):
         )
         # hudi_opts() defaults to SimpleKeyGenerator when a partition is set, but
         # SimpleKeyGenerator only supports a single record-key field. record_key here
-        # is a 6-field composite, so it needs ComplexKeyGenerator instead.
+        # is a 7-field composite, so it needs ComplexKeyGenerator instead.
         opts["hoodie.datasource.write.keygenerator.class"] = (
             "org.apache.hudi.keygen.ComplexKeyGenerator"
         )
