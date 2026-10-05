@@ -378,7 +378,7 @@ else
   echo "Template import skipped (IMPORT_NIFI_TEMPLATE=false)"
 fi
 
-if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_ENABLE_SERVICES:-true}" = "true" ]; then
+if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_START:-true}" = "true" ]; then
     echo "Enabling controller services..."
 
     ENABLE_RETRIES="${NIFI_ENABLE_RETRIES:-30}"
@@ -417,9 +417,34 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_ENABLE_SERVICE
       echo "WARNING: not all controller services reached ENABLED after $ENABLE_RETRIES attempts"
     fi
 
-    echo "Controller services enabled - start the flow from the NiFi UI when ready"
+    echo "Starting flow..."
+
+    START_RETRIES="${NIFI_START_RETRIES:-10}"
+    START_ATTEMPT=1
+
+    while [ "$START_ATTEMPT" -le "$START_RETRIES" ]; do
+      START_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID" \
+        -H "Content-Type: application/json" \
+        -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"RUNNING\"}")
+      START_HTTP_CODE=$(echo "$START_RESPONSE" | tail -n1)
+      START_BODY=$(echo "$START_RESPONSE" | sed '$d')
+
+      if [ "$START_HTTP_CODE" = "200" ]; then
+        echo "Flow started successfully"
+        break
+      fi
+
+      echo "Flow start returned HTTP $START_HTTP_CODE (attempt $START_ATTEMPT/$START_RETRIES)"
+      echo "$START_BODY"
+      START_ATTEMPT=$((START_ATTEMPT + 1))
+      sleep "$ENABLE_DELAY_SECONDS"
+    done
+
+    if [ "$START_ATTEMPT" -gt "$START_RETRIES" ]; then
+      echo "WARNING: flow did not start after $START_RETRIES attempts"
+    fi
 else
-  echo "Controller service enabling skipped (NIFI_AUTO_ENABLE_SERVICES=false)"
+  echo "Auto enable/start skipped (NIFI_AUTO_START=false)"
 fi
 
 echo "Init script finished"
