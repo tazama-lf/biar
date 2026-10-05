@@ -27107,7 +27107,7 @@ SELECT array_agg(DISTINCT table_name) FROM information_schema.columns WHERE tabl
                     </entry>
                     <entry>
                         <key>Endpoint Override URL</key>
-                        <value>http://10.10.80.20:9878</value>
+                        <value>#{pozone}</value>
                     </entry>
                     <entry>
                         <key>Signer Override</key>
