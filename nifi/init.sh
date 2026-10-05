@@ -378,12 +378,17 @@ else
   echo "Template import skipped (IMPORT_NIFI_TEMPLATE=false)"
 fi
 
-if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_START:-true}" = "true" ]; then
+# Enable services and start the flow only for a newly instantiated template.
+# On a re-run where the flow already exists (TEMPLATE_ALREADY_PRESENT=true)
+# the operator's current state - including a deliberately stopped flow -
+# must be preserved, so no state changes are issued.
+if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "$TEMPLATE_ALREADY_PRESENT" != "true" ] && [ "${NIFI_AUTO_START:-true}" = "true" ]; then
     echo "Enabling controller services..."
 
     ENABLE_RETRIES="${NIFI_ENABLE_RETRIES:-30}"
     ENABLE_DELAY_SECONDS="${NIFI_ENABLE_DELAY_SECONDS:-5}"
     ENABLE_ATTEMPT=1
+    SERVICES_ENABLED=false
 
     while [ "$ENABLE_ATTEMPT" -le "$ENABLE_RETRIES" ]; do
       ENABLE_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services" \
@@ -397,14 +402,27 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_START:-true}" 
         echo "$ENABLE_BODY"
       fi
 
-      SERVICES_RESPONSE=$(curl -s "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services")
-      NOT_ENABLED_COUNT=$(echo "$SERVICES_RESPONSE" \
+      SERVICES_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services")
+      SERVICES_HTTP_CODE=$(echo "$SERVICES_RESPONSE" | tail -n1)
+      SERVICES_BODY=$(echo "$SERVICES_RESPONSE" | sed '$d')
+
+      # Only trust a successful, well-formed response. A failed or empty
+      # read must not be mistaken for "all services enabled".
+      if [ "$SERVICES_HTTP_CODE" != "200" ] || ! echo "$SERVICES_BODY" | tr -d '\n' | grep -q '"controllerServices"'; then
+        echo "WARNING: controller-services query returned HTTP $SERVICES_HTTP_CODE (attempt $ENABLE_ATTEMPT/$ENABLE_RETRIES), retrying"
+        ENABLE_ATTEMPT=$((ENABLE_ATTEMPT + 1))
+        sleep "$ENABLE_DELAY_SECONDS"
+        continue
+      fi
+
+      NOT_ENABLED_COUNT=$(echo "$SERVICES_BODY" \
         | tr -d '\n' \
         | sed 's/},{/}\n{/g' \
         | grep -c '"state":"DISABLED"\|"state":"ENABLING"\|"state":"DISABLING"' || true)
 
       if [ "$NOT_ENABLED_COUNT" = "0" ]; then
         echo "All controller services are ENABLED"
+        SERVICES_ENABLED=true
         break
       fi
 
@@ -413,14 +431,16 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_START:-true}" 
       sleep "$ENABLE_DELAY_SECONDS"
     done
 
-    if [ "$ENABLE_ATTEMPT" -gt "$ENABLE_RETRIES" ]; then
-      echo "WARNING: not all controller services reached ENABLED after $ENABLE_RETRIES attempts"
+    if [ "$SERVICES_ENABLED" != "true" ]; then
+      echo "ERROR: controller services did not reach ENABLED after $ENABLE_RETRIES attempts - not starting the flow"
+      exit 1
     fi
 
     echo "Starting flow..."
 
     START_RETRIES="${NIFI_START_RETRIES:-10}"
     START_ATTEMPT=1
+    FLOW_STARTED=false
 
     while [ "$START_ATTEMPT" -le "$START_RETRIES" ]; do
       START_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID" \
@@ -431,6 +451,7 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_START:-true}" 
 
       if [ "$START_HTTP_CODE" = "200" ]; then
         echo "Flow started successfully"
+        FLOW_STARTED=true
         break
       fi
 
@@ -440,11 +461,16 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "${NIFI_AUTO_START:-true}" 
       sleep "$ENABLE_DELAY_SECONDS"
     done
 
-    if [ "$START_ATTEMPT" -gt "$START_RETRIES" ]; then
-      echo "WARNING: flow did not start after $START_RETRIES attempts"
+    if [ "$FLOW_STARTED" != "true" ]; then
+      echo "ERROR: flow did not start after $START_RETRIES attempts"
+      exit 1
     fi
 else
-  echo "Auto enable/start skipped (NIFI_AUTO_START=false)"
+  if [ "$TEMPLATE_ALREADY_PRESENT" = "true" ]; then
+    echo "Flow already present - leaving services and flow state untouched (use the NiFi UI to manage an existing flow)"
+  else
+    echo "Auto enable/start skipped (NIFI_AUTO_START=false)"
+  fi
 fi
 
 echo "Init script finished"
