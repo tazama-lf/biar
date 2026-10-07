@@ -50,10 +50,25 @@ else:
     from oauthenticator.generic import GenericOAuthenticator
 
     # e.g. https://keycloak.example.org/realms/tazama
-    KC_BASE = os.environ.get("KEYCLOAK_ISSUER_URL", "")
+    KC_BASE = os.environ.get("KEYCLOAK_ISSUER_URL", "").rstrip("/")
     # Externally visible JupyterHub URL, used for the OAuth callback,
     # e.g. https://jupyter.example.org
-    PUBLIC_URL = os.environ.get("JUPYTERHUB_PUBLIC_URL", "")
+    PUBLIC_URL = os.environ.get("JUPYTERHUB_PUBLIC_URL", "").rstrip("/")
+
+    # Fail fast on missing configuration: with empty values the hub would
+    # start fine but every login would fail with opaque redirect/token errors.
+    _required = [
+        "KEYCLOAK_ISSUER_URL",
+        "JUPYTERHUB_PUBLIC_URL",
+        "KEYCLOAK_CLIENT_SECRET",
+        "JUPYTERHUB_CRYPT_KEY",
+    ]
+    _missing = [n for n in _required if not os.environ.get(n)]
+    if _missing:
+        raise RuntimeError(
+            "Keycloak auth (JUPYTERHUB_AUTH=keycloak) requires environment "
+            "variables: " + ", ".join(_missing)
+        )
 
     c.JupyterHub.authenticator_class = GenericOAuthenticator
     c.GenericOAuthenticator.login_service = "Keycloak"
