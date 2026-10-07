@@ -1,6 +1,7 @@
 jupyterlab
 jupyterhub
 jupyterhub-nativeauthenticator
+oauthenticator
 pyspark==3.4.2
 findspark
 pandas
