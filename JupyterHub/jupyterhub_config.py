@@ -18,7 +18,9 @@ c.Spawner.start_timeout = 120
 c.Spawner.environment = {
     "SPARK_HOME": os.environ.get("SPARK_HOME", "/opt/spark"),
     "JAVA_HOME": os.environ.get("JAVA_HOME", "/opt/java"),
-    "SPARK_JARS": os.environ.get("SPARK_JARS", "/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar"),
+    "SPARK_JARS": os.environ.get(
+        "SPARK_JARS", "/opt/jars/hudi-spark3.4-bundle_2.12-0.14.1.jar"
+    ),
     "S3A_ENDPOINT": os.environ.get("S3A_ENDPOINT", ""),
     "S3A_ACCESS_KEY": os.environ.get("S3A_ACCESS_KEY", ""),
     "S3A_SECRET_KEY": os.environ.get("S3A_SECRET_KEY", ""),
@@ -72,7 +74,9 @@ else:
 
     c.JupyterHub.authenticator_class = GenericOAuthenticator
     c.GenericOAuthenticator.login_service = "Keycloak"
-    c.GenericOAuthenticator.client_id = os.environ.get("KEYCLOAK_CLIENT_ID", "jupyterhub")
+    c.GenericOAuthenticator.client_id = os.environ.get(
+        "KEYCLOAK_CLIENT_ID", "jupyterhub"
+    )
     c.GenericOAuthenticator.client_secret = os.environ.get("KEYCLOAK_CLIENT_SECRET", "")
     c.GenericOAuthenticator.oauth_callback_url = f"{PUBLIC_URL}/hub/oauth_callback"
     c.GenericOAuthenticator.authorize_url = f"{KC_BASE}/protocol/openid-connect/auth"
@@ -110,6 +114,7 @@ c.JupyterHub.db_url = "sqlite:////data/jupyterhub.sqlite"
 # and would cause useradd to fail.
 def pre_spawn_hook(spawner):
     import os
+
     username = spawner.user.name
     user_dir = f"/srv/notebooks/{username}"
     shared_link = f"{user_dir}/shared"
