@@ -72,7 +72,92 @@ else:
             "variables: " + ", ".join(_missing)
         )
 
-    c.JupyterHub.authenticator_class = GenericOAuthenticator
+    import contextvars
+    import json
+
+    from tornado.httpclient import HTTPClientError
+
+    # Set by get_token_info only when Keycloak confirms the refresh token is
+    # dead (OAuth error "invalid_grant"). Every other failure (Keycloak down,
+    # 5xx, invalid_client after a secret rotation, a userinfo error after a
+    # successful refresh) leaves it unset, so running servers are kept.
+    # Each hub request runs in its own asyncio task, so this is per-refresh.
+    _refresh_token_rejected = contextvars.ContextVar(
+        "refresh_token_rejected", default=False
+    )
+
+    def _oauth_error(e):
+        """Return the OAuth `error` field of a failed token response, or ""."""
+        if e.response is None or not e.response.body:
+            return ""
+        try:
+            return json.loads(e.response.body).get("error", "")
+        except (ValueError, AttributeError):
+            return ""
+
+    class KeycloakOAuthenticator(GenericOAuthenticator):
+        """GenericOAuthenticator that ends the session when Keycloak revokes it.
+
+        When Keycloak rejects the refresh token (session timeout, admin logout,
+        password change), the stock refresh_user only returns False. The user's
+        single-user server keeps running and keeps calling the hub, and every
+        call retries the dead refresh token, forever (tazama-lf/biar#209).
+        Here we stop the user's servers and clear the hub cookie instead, so
+        the next visit goes through a fresh Keycloak login.
+        """
+
+        async def get_token_info(self, handler, params):
+            try:
+                return await super().get_token_info(handler, params)
+            except HTTPClientError as e:
+                # Only invalid_grant means the token itself is dead. Other 4xx
+                # errors (invalid_client, invalid_request, ...) are config
+                # problems and must not stop every notebook in the fleet.
+                # Also called on login, where the flag is never read.
+                if 400 <= e.code < 500 and _oauth_error(e) == "invalid_grant":
+                    _refresh_token_rejected.set(True)
+                raise
+
+        async def refresh_user(self, user, handler=None, **kwargs):
+            _refresh_token_rejected.set(False)
+            result = await super().refresh_user(user, handler=handler, **kwargs)
+            if result is not False:
+                return result
+            if not _refresh_token_rejected.get():
+                # Not a confirmed revocation (Keycloak outage, userinfo error,
+                # client misconfiguration): don't kill running notebooks. The
+                # request is still denied and the next refresh retries.
+                self.log.warning(
+                    f"Refreshing auth for {user.name} failed without a "
+                    "confirmed token revocation; leaving servers running"
+                )
+                return result
+
+            active = [
+                name
+                for name, spawner in user.spawners.items()
+                if spawner.active and not spawner.pending
+            ]
+            self.log.warning(
+                f"Keycloak session for {user.name} is no longer valid; "
+                f"stopping servers {active} and requiring a fresh login"
+            )
+            for server_name in active:
+                try:
+                    if handler is not None:
+                        # Also removes the proxy route, unlike user.stop()
+                        await handler.stop_single_user(user, server_name)
+                    else:
+                        await user.stop(server_name)
+                except Exception:
+                    self.log.exception(
+                        f"Failed to stop server {server_name!r} for {user.name}"
+                    )
+            if handler is not None:
+                handler.clear_login_cookie()
+            return result
+
+    c.JupyterHub.authenticator_class = KeycloakOAuthenticator
     c.GenericOAuthenticator.login_service = "Keycloak"
     c.GenericOAuthenticator.client_id = os.environ.get(
         "KEYCLOAK_CLIENT_ID", "jupyterhub"
