@@ -17,11 +17,6 @@ timeout="${NIFI_ADMIN_GROUP_TIMEOUT:-900}"
 
 log() { echo "[tazama-nifi] admin group: $*"; }
 
-if [ -z "${group}" ]; then
-  log 'NIFI_ADMIN_GROUP is empty; skipping.'
-  exit 0
-fi
-
 call() {
   local method="$1" path="$2" body="${3:-}"
   local -a args=(--silent --show-error --fail --max-time 30
@@ -43,6 +38,77 @@ until call GET /flow/current-user >/dev/null 2>&1; do
   sleep 10
 done
 
+# NiFi seeds the root process group policies for the Initial Admin only if a
+# flow already exists at its first secured start. On a fresh install neither the
+# machine identity nor the admin group could see or change the canvas, so grant
+# read and write on the root process group and its data explicitly.
+ensure_root_policies() {
+  local root_id users machine_id resource action policy body
+  root_id="$(call GET /flow/process-groups/root | jq -r '.processGroupFlow.id')" || {
+    log 'cannot read the root process group.'
+    return 1
+  }
+  users="$(call GET /tenants/users)" || {
+    log 'cannot list users.'
+    return 1
+  }
+  machine_id="$(jq -r --arg m "${machine}" '.users[] | select(.component.identity == $m) | .id' <<<"${users}" | head -n1)"
+  if [ -z "${machine_id}" ]; then
+    log "machine identity ${machine} not found."
+    return 1
+  fi
+  for resource in "/process-groups/${root_id}" "/data/process-groups/${root_id}"; do
+    for action in read write; do
+      # Returns the effective policy, which may be inherited from a parent
+      # resource; only a policy on this exact resource counts.
+      if policy="$(call GET "/policies/${action}${resource}" 2>/dev/null)" &&
+        [ "$(jq -r '.component.resource' <<<"${policy}")" = "${resource}" ]; then
+        if jq -e --arg m "${machine_id}" --arg g "${group_id}" \
+          'any(.component.users[]?; .id == $m) and ($g == "" or any(.component.userGroups[]?; .id == $g))' \
+          <<<"${policy}" >/dev/null; then
+          continue
+        fi
+        body="$(jq -c --arg m "${machine_id}" --arg g "${group_id}" '{
+            revision: .revision,
+            component: {
+              id: .component.id,
+              resource: .component.resource,
+              action: .component.action,
+              users: ([.component.users[]? | {id}] + [{id: $m}] | unique_by(.id)),
+              userGroups: ([.component.userGroups[]? | {id}] + (if $g == "" then [] else [{id: $g}] end) | unique_by(.id))
+            }
+          }' <<<"${policy}")"
+        call PUT "/policies/$(jq -r '.component.id' <<<"${policy}")" "${body}" >/dev/null || {
+          log "cannot update policy ${action} ${resource}."
+          continue
+        }
+      else
+        body="$(jq -nc --arg r "${resource}" --arg a "${action}" --arg m "${machine_id}" --arg g "${group_id}" '{
+            revision: {version: 0},
+            component: {
+              resource: $r,
+              action: $a,
+              users: [{id: $m}],
+              userGroups: (if $g == "" then [] else [{id: $g}] end)
+            }
+          }')"
+        call POST /policies "${body}" >/dev/null || {
+          log "cannot create policy ${action} ${resource}."
+          continue
+        }
+      fi
+      log "granted ${action} ${resource} (root process group)"
+    done
+  done
+}
+
+if [ -z "${group}" ]; then
+  group_id=''
+  ensure_root_policies
+  log 'NIFI_ADMIN_GROUP is empty; no group set up.'
+  exit 0
+fi
+
 groups_json="$(call GET /tenants/user-groups)" || {
   log 'cannot list user groups.'
   exit 1
@@ -56,6 +122,8 @@ if [ -z "${group_id}" ]; then
   }
   log "created group ${group} (${group_id})."
 fi
+
+ensure_root_policies
 
 users_json="$(call GET /tenants/users)" || {
   log 'cannot list users.'

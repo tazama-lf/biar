@@ -85,7 +85,7 @@ NiFi has no tenant isolation: there is one shared flow and its connection pools 
 
    The files are owned by uid 1000 (`nifi`) and the key is mode `0600`. Share the directory with other containers through a volume; consumers must run as uid 1000 or root. Treat `machine.key` as an admin credential.
 3. **Sensitive properties key.** See [Sensitive properties key](#sensitive-properties-key).
-4. **Admin group.** Once NiFi is up, a background job (`tazama-admin-group.sh`) creates the NiFi user group `NIFI_ADMIN_GROUP` and grants it every policy the machine identity holds. NiFi matches group names from the groups claim against its own groups, so Keycloak group members become admins without per-user NiFi changes. The job is idempotent and logs `admin group: done (N policies updated)`.
+4. **Admin group.** Once NiFi is up, a background job (`tazama-admin-group.sh`) creates the NiFi user group `NIFI_ADMIN_GROUP` and grants it every policy the machine identity holds. NiFi matches group names from the groups claim against its own groups, so Keycloak group members become admins without per-user NiFi changes. The job is idempotent and logs `admin group: done (N policies updated)`. It also grants the machine identity and the group read and write on the root process group and its data, which NiFi does not grant the Initial Admin on a fresh install. With an empty `NIFI_ADMIN_GROUP`, only the machine identity gets these.
 
 ### Supplying your own certificates
 
