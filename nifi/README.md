@@ -50,7 +50,7 @@ Secret values must not contain `|`, `&` or `\` (the stock scripts write them wit
 | `NIFI_WEB_HTTPS_PORT` / `NIFI_WEB_HTTPS_HOST`             | `8443` / `0.0.0.0`            | HTTPS listener                                                                           |
 | `NIFI_TLS_SAN`                                            | (none)                        | Extra comma-separated host names/IPs for the generated server certificate                |
 | `NIFI_TLS_DIR`                                            | `$NIFI_HOME/conf/tls`         | Where generated certificates are kept                                                    |
-| `NIFI_TLS_CLIENT_DIR`                                     | `$NIFI_TLS_DIR/client`        | Where the machine identity certificate is written                                        |
+| `NIFI_TLS_CLIENT_DIR`                                     | `/opt/nifi/machine-identity`  | Where the machine identity certificate is written                                        |
 | `KEYSTORE_PATH` / `KEYSTORE_TYPE`                         | generated / `PKCS12`          | Supply your own server keystore                                                          |
 | `TRUSTSTORE_PATH` / `TRUSTSTORE_TYPE`                     | generated / `PKCS12`          | Supply your own truststore                                                               |
 | `NIFI_ADMIN_GROUP_TIMEOUT`                                | `900`                         | Seconds the admin group set-up waits for NiFi to start                                   |
@@ -85,7 +85,9 @@ NiFi has no tenant isolation: there is one shared flow and its connection pools 
    curl --cacert ca.crt --cert machine.crt --key machine.key https://nifi:8443/nifi-api/flow/current-user
    ```
 
-   The files are owned by uid 1000 (`nifi`) and the key is mode `0600`. Share the directory with other containers through a volume; consumers must run as uid 1000 or root. Treat `machine.key` as an admin credential.
+   The files are owned by uid 1000 (`nifi`) and the key is mode `0600`. Treat `machine.key` as an admin credential.
+
+   To give other containers the certificate, mount a named volume at `/opt/nifi/machine-identity` in NiFi and the same volume (read-only) in the consumer, which must run as uid 1000 or root. Docker gives a new named volume the directory's `nifi` ownership. Bind mounts and Kubernetes volumes are not initialised this way, so use a host directory owned by uid 1000, or `fsGroup: 1000`. Do not share the `conf` volume: it holds the internal CA key, the keystore and `nifi.properties` with the sensitive properties key and the OIDC client secret. Without a volume, the certificate is reissued (same identity, same CA) when the container is recreated.
 3. **Sensitive properties key.** See [Sensitive properties key](#sensitive-properties-key).
 4. **Admin group.** Once NiFi is up, a background job (`tazama-admin-group.sh`) creates the NiFi user group `NIFI_ADMIN_GROUP` and grants it every policy the machine identity holds. NiFi matches group names from the groups claim against its own groups, so Keycloak group members become admins without per-user NiFi changes. The job is idempotent and logs `admin group: done (N policies updated)`. It also grants the machine identity and the group read and write on the root process group and its data, which NiFi does not grant the Initial Admin on a fresh install. With an empty `NIFI_ADMIN_GROUP`, only the machine identity gets these.
 

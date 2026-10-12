@@ -112,7 +112,7 @@ needs_renewal() {
 
 ensure_tls() {
   tls_dir="${NIFI_TLS_DIR:-${NIFI_HOME}/conf/tls}"
-  local client_dir="${NIFI_TLS_CLIENT_DIR:-${tls_dir}/client}"
+  local client_dir="${NIFI_TLS_CLIENT_DIR:-/opt/nifi/machine-identity}"
   mkdir -p "${tls_dir}" "${client_dir}"
   chmod 700 "${tls_dir}"
 

@@ -9,6 +9,12 @@ RUN curl -fL --retry 5 --retry-delay 5 --retry-connrefused \
   "$PG_JDBC_URL" -o /opt/nifi/nifi-current/lib/postgresql-${PG_JDBC_VERSION}.jar \
   && chown nifi:nifi /opt/nifi/nifi-current/lib/postgresql-${PG_JDBC_VERSION}.jar
 
+# Machine identity certificate (keycloak mode). Owned by nifi so a named volume
+# mounted here is writable; share that volume, never the conf volume.
+RUN mkdir -p /opt/nifi/machine-identity \
+  && chown nifi:nifi /opt/nifi/machine-identity \
+  && chmod 700 /opt/nifi/machine-identity
+
 # Authentication mode switch (NIFI_AUTH=none|keycloak); see README.md.
 COPY --chmod=0755 entrypoint.sh /opt/nifi/scripts/tazama-entrypoint.sh
 COPY --chmod=0755 tazama-admin-group.sh /opt/nifi/scripts/tazama-admin-group.sh
