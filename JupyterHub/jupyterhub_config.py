@@ -73,15 +73,27 @@ else:
         )
 
     import contextvars
+    import json
 
     from tornado.httpclient import HTTPClientError
 
-    # Set by get_token_info when the refresh-token exchange fails for a reason
-    # that says nothing about the token (Keycloak down, network error, 5xx).
+    # Set by get_token_info only when Keycloak confirms the refresh token is
+    # dead (OAuth error "invalid_grant"). Every other failure (Keycloak down,
+    # 5xx, invalid_client after a secret rotation, a userinfo error after a
+    # successful refresh) leaves it unset, so running servers are kept.
     # Each hub request runs in its own asyncio task, so this is per-refresh.
-    _refresh_transient_error = contextvars.ContextVar(
-        "refresh_transient_error", default=False
+    _refresh_token_rejected = contextvars.ContextVar(
+        "refresh_token_rejected", default=False
     )
+
+    def _oauth_error(e):
+        """Return the OAuth `error` field of a failed token response, or ""."""
+        if e.response is None or not e.response.body:
+            return ""
+        try:
+            return json.loads(e.response.body).get("error", "")
+        except (ValueError, AttributeError):
+            return ""
 
     class KeycloakOAuthenticator(GenericOAuthenticator):
         """GenericOAuthenticator that ends the session when Keycloak revokes it.
@@ -98,27 +110,26 @@ else:
             try:
                 return await super().get_token_info(handler, params)
             except HTTPClientError as e:
-                # 4xx (e.g. 400 invalid_grant) means the token itself was
-                # rejected; anything else (599 connection error, 5xx) is
-                # Keycloak being unavailable.
-                if not 400 <= e.code < 500:
-                    _refresh_transient_error.set(True)
-                raise
-            except OSError:
-                _refresh_transient_error.set(True)
+                # Only invalid_grant means the token itself is dead. Other 4xx
+                # errors (invalid_client, invalid_request, ...) are config
+                # problems and must not stop every notebook in the fleet.
+                # Also called on login, where the flag is never read.
+                if 400 <= e.code < 500 and _oauth_error(e) == "invalid_grant":
+                    _refresh_token_rejected.set(True)
                 raise
 
         async def refresh_user(self, user, handler=None, **kwargs):
-            _refresh_transient_error.set(False)
+            _refresh_token_rejected.set(False)
             result = await super().refresh_user(user, handler=handler, **kwargs)
             if result is not False:
                 return result
-            if _refresh_transient_error.get():
-                # Don't kill running notebooks over a Keycloak outage; the
+            if not _refresh_token_rejected.get():
+                # Not a confirmed revocation (Keycloak outage, userinfo error,
+                # client misconfiguration): don't kill running notebooks. The
                 # request is still denied and the next refresh retries.
                 self.log.warning(
-                    f"Keycloak unreachable refreshing {user.name}; "
-                    "leaving servers running"
+                    f"Refreshing auth for {user.name} failed without a "
+                    "confirmed token revocation; leaving servers running"
                 )
                 return result
 
