@@ -72,7 +72,81 @@ else:
             "variables: " + ", ".join(_missing)
         )
 
-    c.JupyterHub.authenticator_class = GenericOAuthenticator
+    import contextvars
+
+    from tornado.httpclient import HTTPClientError
+
+    # Set by get_token_info when the refresh-token exchange fails for a reason
+    # that says nothing about the token (Keycloak down, network error, 5xx).
+    # Each hub request runs in its own asyncio task, so this is per-refresh.
+    _refresh_transient_error = contextvars.ContextVar(
+        "refresh_transient_error", default=False
+    )
+
+    class KeycloakOAuthenticator(GenericOAuthenticator):
+        """GenericOAuthenticator that ends the session when Keycloak revokes it.
+
+        When Keycloak rejects the refresh token (session timeout, admin logout,
+        password change), the stock refresh_user only returns False. The user's
+        single-user server keeps running and keeps calling the hub, and every
+        call retries the dead refresh token, forever (tazama-lf/biar#209).
+        Here we stop the user's servers and clear the hub cookie instead, so
+        the next visit goes through a fresh Keycloak login.
+        """
+
+        async def get_token_info(self, handler, params):
+            try:
+                return await super().get_token_info(handler, params)
+            except HTTPClientError as e:
+                # 4xx (e.g. 400 invalid_grant) means the token itself was
+                # rejected; anything else (599 connection error, 5xx) is
+                # Keycloak being unavailable.
+                if not 400 <= e.code < 500:
+                    _refresh_transient_error.set(True)
+                raise
+            except OSError:
+                _refresh_transient_error.set(True)
+                raise
+
+        async def refresh_user(self, user, handler=None, **kwargs):
+            _refresh_transient_error.set(False)
+            result = await super().refresh_user(user, handler=handler, **kwargs)
+            if result is not False:
+                return result
+            if _refresh_transient_error.get():
+                # Don't kill running notebooks over a Keycloak outage; the
+                # request is still denied and the next refresh retries.
+                self.log.warning(
+                    f"Keycloak unreachable refreshing {user.name}; "
+                    "leaving servers running"
+                )
+                return result
+
+            active = [
+                name
+                for name, spawner in user.spawners.items()
+                if spawner.active and not spawner.pending
+            ]
+            self.log.warning(
+                f"Keycloak session for {user.name} is no longer valid; "
+                f"stopping servers {active} and requiring a fresh login"
+            )
+            for server_name in active:
+                try:
+                    if handler is not None:
+                        # Also removes the proxy route, unlike user.stop()
+                        await handler.stop_single_user(user, server_name)
+                    else:
+                        await user.stop(server_name)
+                except Exception:
+                    self.log.exception(
+                        f"Failed to stop server {server_name!r} for {user.name}"
+                    )
+            if handler is not None:
+                handler.clear_login_cookie()
+            return result
+
+    c.JupyterHub.authenticator_class = KeycloakOAuthenticator
     c.GenericOAuthenticator.login_service = "Keycloak"
     c.GenericOAuthenticator.client_id = os.environ.get(
         "KEYCLOAK_CLIENT_ID", "jupyterhub"
