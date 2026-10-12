@@ -44,7 +44,7 @@ done
 # read and write on the root process group and its data explicitly.
 ensure_root_policies() {
   local root_id users machine_id resource action policy body failed=0
-  root_id="$(call GET /flow/process-groups/root | jq -r '.processGroupFlow.id')" || {
+  root_id="$(call GET /flow/process-groups/root | jq -er '.processGroupFlow.id // empty')" || {
     log 'cannot read the root process group.'
     return 1
   }
@@ -122,7 +122,7 @@ groups_json="$(call GET /tenants/user-groups)" || {
 group_id="$(jq -r --arg g "${group}" '.userGroups[] | select(.component.identity == $g) | .id' <<<"${groups_json}" | head -n1)"
 if [ -z "${group_id}" ]; then
   body="$(jq -nc --arg g "${group}" '{revision: {version: 0}, component: {identity: $g}}')"
-  group_id="$(call POST /tenants/user-groups "${body}" | jq -r '.id')" || {
+  group_id="$(call POST /tenants/user-groups "${body}" | jq -er '.id // empty')" || {
     log "cannot create group ${group}."
     exit 1
   }
