@@ -43,7 +43,7 @@ done
 # machine identity nor the admin group could see or change the canvas, so grant
 # read and write on the root process group and its data explicitly.
 ensure_root_policies() {
-  local root_id users machine_id resource action policy body
+  local root_id users machine_id resource action policy body failed=0
   root_id="$(call GET /flow/process-groups/root | jq -r '.processGroupFlow.id')" || {
     log 'cannot read the root process group.'
     return 1
@@ -80,6 +80,7 @@ ensure_root_policies() {
           }' <<<"${policy}")"
         call PUT "/policies/$(jq -r '.component.id' <<<"${policy}")" "${body}" >/dev/null || {
           log "cannot update policy ${action} ${resource}."
+          failed=1
           continue
         }
       else
@@ -94,17 +95,22 @@ ensure_root_policies() {
           }')"
         call POST /policies "${body}" >/dev/null || {
           log "cannot create policy ${action} ${resource}."
+          failed=1
           continue
         }
       fi
       log "granted ${action} ${resource} (root process group)"
     done
   done
+  return "${failed}"
 }
 
 if [ -z "${group}" ]; then
   group_id=''
-  ensure_root_policies
+  ensure_root_policies || {
+    log 'root process group policies were not set up.'
+    exit 1
+  }
   log 'NIFI_ADMIN_GROUP is empty; no group set up.'
   exit 0
 fi
@@ -123,7 +129,13 @@ if [ -z "${group_id}" ]; then
   log "created group ${group} (${group_id})."
 fi
 
-ensure_root_policies
+# On failure, still copy the other policies so admins get as much access as
+# possible, and report the failure at the end.
+errors=0
+ensure_root_policies || {
+  log 'root process group policies were not set up.'
+  errors=1
+}
 
 users_json="$(call GET /tenants/users)" || {
   log 'cannot list users.'
@@ -139,6 +151,7 @@ added=0
 for id in ${policy_ids}; do
   policy="$(call GET "/policies/${id}")" || {
     log "cannot read policy ${id}."
+    errors=1
     continue
   }
   if jq -e --arg gid "${group_id}" 'any(.component.userGroups[]?; .id == $gid)' <<<"${policy}" >/dev/null; then
@@ -159,6 +172,11 @@ for id in ${policy_ids}; do
     log "granted $(jq -r '.component.action + " " + .component.resource' <<<"${policy}")"
   else
     log "cannot update policy ${id}."
+    errors=1
   fi
 done
+if [ "${errors}" -ne 0 ]; then
+  log "finished with errors (${added} policies updated)."
+  exit 1
+fi
 log "done (${added} policies updated)."
