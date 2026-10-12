@@ -6,8 +6,10 @@
 
 | `NIFI_AUTH`      | Protocol         | Authentication                                    | Use for                                   |
 | ---------------- | ---------------- | ------------------------------------------------- | ----------------------------------------- |
-| `none` (default) | HTTP, port 8088  | None. Every client has full control of NiFi.      | Local development on your own machine     |
+| `none` (default) | HTTP, port `NIFI_WEB_HTTP_PORT` (8088 in this repository's compose and env files) | None. Every client has full control of NiFi. | Local development on your own machine |
 | `keycloak`       | HTTPS, port 8443 | Keycloak login (OIDC); access by Keycloak group   | Any deployment other people can reach     |
+
+In `none` mode, if `NIFI_WEB_HTTP_PORT` is not set, the stock image behaviour applies: HTTPS on 8443 with the stock single-user login.
 
 > [!WARNING]
 > In `none` mode NiFi performs no authentication or authorization. Anyone who can reach the port can read the data flowing through NiFi (all tenants), change the flow, and run commands inside the container. Publish the port to `127.0.0.1` only. The container prints a warning banner at start-up in this mode.

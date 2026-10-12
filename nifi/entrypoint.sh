@@ -190,7 +190,7 @@ migrate_sensitive_props_key() {
   local current
   current="$(sed -n 's/^nifi\.sensitive\.props\.key=//p' "${NIFI_HOME}/conf/nifi.properties")"
   if [ -n "${current}" ] && [ "${current}" != "${NIFI_SENSITIVE_PROPS_KEY}" ]; then
-    if ls "${NIFI_HOME}"/conf/flow.json.gz "${NIFI_HOME}"/conf/flow.xml.gz >/dev/null 2>&1; then
+    if [ -f "${NIFI_HOME}/conf/flow.json.gz" ] || [ -f "${NIFI_HOME}/conf/flow.xml.gz" ]; then
       log 'Re-encrypting the existing flow with NIFI_SENSITIVE_PROPS_KEY'
       "${NIFI_HOME}/bin/nifi.sh" set-sensitive-properties-key "${NIFI_SENSITIVE_PROPS_KEY}" >/dev/null
     fi
