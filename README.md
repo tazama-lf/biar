@@ -58,7 +58,7 @@ The platform consists of the following components:
 
 3. **Access the services**
    - JupyterHub: [http://localhost:8888](http://localhost:8888)
-   - NiFi: [http://localhost:8088](http://localhost:8088)
+   - NiFi: [http://localhost:8088](http://localhost:8088) (no authentication; see [NiFi](#nifi))
    - Datalakehouse API: [http://localhost:8282](http://localhost:8282)
    - Automation Orchestrator API: [http://localhost:7619](http://localhost:7619)
      Additional ETLs
@@ -91,6 +91,13 @@ A multi-user notebook environment pre-loaded with analytics dashboards:
 ### NiFi
 
 A custom Apache NiFi deployment with pre-built flow templates (`tazama.xml`) and PostgreSQL JDBC driver. Initialization scripts automatically configure parameter contexts for S3, Ozone, and HTTP endpoints.
+
+The image has two authentication modes, selected with `NIFI_AUTH`:
+
+- `none` (default): plain HTTP on 8088 with **no authentication**. Anyone who can reach the port has full control of NiFi. Use it for local development only.
+- `keycloak`: HTTPS on 8443 with Keycloak login. Use it for any deployment other people can reach.
+
+See [nifi/README.md](nifi/README.md) for the variables, certificates and Keycloak set-up.
 https://github.com/tazama-lf/docs/blob/dev/Technical/Deployment-Guides/Nifi-Deployment-Guide.md
 
 ### Unstructured Pipeline
