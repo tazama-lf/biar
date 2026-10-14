@@ -289,3 +289,66 @@ def test_absent_table_reports_original_name(api, warehouse, monkeypatch):
 )
 def test_references_table_is_case_insensitive(api, query, table, expected):
     assert api._references_table(query, table) is expected
+
+
+def test_late_arriving_table_is_loaded_once_its_path_exists(api, warehouse, monkeypatch, tmp_path):
+    paths, data = warehouse
+    spark = use_session(api, monkeypatch, data)
+    with pytest.raises(RuntimeError, match="typologies"):
+        api._execute_sql_sync("SELECT * FROM typologies", "A")  # path missing at session start
+
+    late = tmp_path / "does-not-exist"
+    late.mkdir()  # the ETL wrote its first batch
+    data[paths["typologies"]] = [{api.TENANT_ID_COLUMN: "A", "id": 9}, {api.TENANT_ID_COLUMN: "B", "id": 10}]
+
+    rows = api._execute_sql_sync("SELECT * FROM TYPOLOGIES", "A")
+
+    assert [r["id"] for r in rows] == [9]
+    assert spark.loads.count(paths["typologies"]) == 1
+
+
+def test_failed_load_is_retried_on_a_later_request(api, warehouse, monkeypatch):
+    paths, data = warehouse
+    spark = use_session(api, monkeypatch, data)
+    real_load = spark.read.load
+    calls = {"n": 0}
+
+    def flaky(path):
+        if path == paths["alerts"] and calls["n"] < 2:  # registration + same-request retry
+            calls["n"] += 1
+            raise RuntimeError("transient hudi read error")
+        return real_load(path)
+
+    monkeypatch.setattr(spark.read, "load", flaky)
+
+    with pytest.raises(RuntimeError, match="alerts"):
+        api._execute_sql_sync("SELECT * FROM alerts", "A")
+    assert len(api._execute_sql_sync("SELECT * FROM alerts", "A")) == 1
+
+
+def test_unreferenced_missing_tables_are_not_loaded(api, warehouse, monkeypatch, tmp_path):
+    paths, data = warehouse
+    spark = use_session(api, monkeypatch, data)
+    api._execute_sql_sync("SELECT * FROM alerts", "A")
+    (tmp_path / "does-not-exist").mkdir()
+    data[paths["typologies"]] = [{api.TENANT_ID_COLUMN: "A", "id": 9}]
+
+    api._execute_sql_sync("SELECT * FROM alerts", "A")
+
+    assert paths["typologies"] not in spark.loads
+
+
+def test_frames_stay_paired_with_their_session(api, warehouse, monkeypatch):
+    _, data = warehouse
+    first = FakeSpark(data)
+    second = FakeSpark(data)
+
+    frames_first = api._ensure_registered(first)
+    snapshot = dict(frames_first)
+    frames_second = api._ensure_registered(second)  # session replaced while a request holds frames_first
+
+    assert frames_first is not frames_second
+    assert frames_first == snapshot  # the earlier request's dict was not mutated or cleared
+    assert all(df.session is first for df in frames_first.values())
+    assert all(df.session is second for df in frames_second.values())
+
