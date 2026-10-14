@@ -385,22 +385,30 @@ def _get_hudi_data_sync(
 
 
 _registered_session: Optional[SparkSession] = None
+_base_frames: Dict[str, Any] = {}
 _registration_lock = threading.Lock()
+
+
+def _load_hudi(spark: SparkSession, path: str):
+    return spark.read.format("hudi").load(path)
 
 
 def _register_all_hudi_tables(spark: SparkSession) -> None:
     """
-    Register every on-disk GOLD_PATHS entry as a tenant-agnostic temp view.
-    Called once per Spark session so the catalog invariant is owned by the
-    session lifecycle, not by individual requests. Tenant filtering is applied
-    per request in _execute_sql_sync.
+    Load every on-disk GOLD_PATHS entry once per Spark session.
+
+    The unfiltered DataFrames are kept in ``_base_frames`` and are deliberately
+    NOT registered in the Spark catalog: anything registered there can be
+    queried by name, so only tenant-filtered views are ever exposed to SQL
+    (see _execute_sql_sync).
     """
+    _base_frames.clear()
     for tname, path in GOLD_PATHS.items():
         if os.path.isdir(path):
             try:
-                spark.read.format("hudi").load(path).createOrReplaceTempView(tname)
+                _base_frames[tname] = _load_hudi(spark, path)
             except Exception as exc:
-                logger.error(f"Failed to register '{tname}' at '{path}': {exc}")
+                logger.error(f"Failed to load '{tname}' at '{path}': {exc}")
         else:
             logger.warning(f"Path for table '{tname}' not found: {path}")
 
@@ -414,63 +422,51 @@ def _ensure_registered(spark: SparkSession) -> None:
             _registered_session = spark
 
 
-def _rewrite_table_refs(sql_query: str, tables) -> str:
-    """
-    Point references to the given table names at their tenant-filtered views
-    (``__tenant_<name>``). Single-quoted string literals are left untouched.
-    """
-    if not tables:
-        return sql_query
-    names = "|".join(re.escape(t) for t in sorted(tables, key=len, reverse=True))
-    pattern = re.compile(rf"('(?:[^'\\]|\\.|'')*')|\b({names})\b")
-    return pattern.sub(
-        lambda m: m.group(1) if m.group(1) else f"__tenant_{m.group(2)}",
-        sql_query,
-    )
-
-
 def _references_table(sql_query: str, tname: str) -> bool:
-    return re.search(rf"\b{re.escape(tname)}\b", sql_query) is not None
+    """Case-insensitive, like Spark identifiers. Only used to decide what to refresh."""
+    return re.search(rf"\b{re.escape(tname)}\b", sql_query, re.IGNORECASE) is not None
 
 
-def _refresh_view(spark: SparkSession, tname: str) -> None:
+def _refresh_view(spark: SparkSession, tname: str, tenant_id: str) -> None:
     """
-    Pick up Hudi commits made since the view was registered. Only the tables a
+    Pick up Hudi commits made since the table was loaded. Only the tables a
     query actually references are refreshed, so the cost stays per-query
-    rather than per-table-in-GOLD_PATHS. On failure the view is reloaded.
+    rather than per-table-in-GOLD_PATHS. On failure the table is reloaded.
     """
     try:
         spark.catalog.refreshTable(tname)
     except Exception as exc:
         logger.warning(f"refreshTable failed for '{tname}' ({exc}); reloading.")
-        spark.read.format("hudi").load(GOLD_PATHS[tname]).createOrReplaceTempView(tname)
+        _base_frames[tname] = _load_hudi(spark, GOLD_PATHS[tname])
+        _tenant_view(_base_frames[tname], tenant_id).createOrReplaceTempView(tname)
+
+
+def _tenant_view(base, tenant_id: str):
+    if TENANT_ID_COLUMN in base.columns:
+        return base.filter(F.col(TENANT_ID_COLUMN) == tenant_id)
+    return base
 
 
 def _execute_sql_sync(sql_query: str, tenant_id: str, limit: int = None):
     """
-    Run SQL against the Gold tables. Base Hudi views are registered once per
-    Spark session and refreshed per query for the tables it references; each
-    call layers tenant-filtered views (``__tenant_<name>``) on top and rewrites the query to use them, so the caller only ever sees
-    its own tenant's rows. The lock serialises the shared view names and the
-    query that uses them.
+    Run SQL against the Gold tables. The unfiltered tables are loaded once per
+    Spark session and kept out of the Spark catalog. Each call registers
+    tenant-filtered temp views under the real table names, so the caller's SQL
+    resolves only to its own tenant's rows whatever the identifier casing or
+    quoting. The lock serialises the shared view names and the query that
+    uses them.
     """
     spark = get_spark()
     _ensure_registered(spark)
 
     with _sql_lock:
-        available = []
-        for tname in GOLD_PATHS:
-            if not spark.catalog.tableExists(tname):
-                continue
+        for tname, base in _base_frames.items():
+            _tenant_view(base, tenant_id).createOrReplaceTempView(tname)
+        for tname in list(_base_frames):
             if _references_table(sql_query, tname):
-                _refresh_view(spark, tname)
-            base = spark.table(tname)
-            if TENANT_ID_COLUMN in base.columns:
-                base = base.filter(F.col(TENANT_ID_COLUMN) == tenant_id)
-            base.createOrReplaceTempView(f"__tenant_{tname}")
-            available.append(tname)
+                _refresh_view(spark, tname, tenant_id)
 
-        df = spark.sql(_rewrite_table_refs(sql_query, available))
+        df = spark.sql(sql_query)
 
         if limit:
             df = df.limit(limit)
