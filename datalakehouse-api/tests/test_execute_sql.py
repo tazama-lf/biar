@@ -1,0 +1,282 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for the per-session Hudi view registration in lakehouse_query_api.py.
+
+Spark and findspark are replaced with in-memory fakes, so no JVM is needed.
+The fakes model just enough of the Spark catalog (temp views, tenant filter,
+SQL referencing views) to check the registration/rewrite/tenant behaviour.
+
+Run with:
+    cd datalakehouse-api
+    pytest tests/test_execute_sql.py -v
+"""
+import importlib
+import logging
+import re
+import sys
+import threading
+import types
+from unittest.mock import MagicMock
+
+import pytest
+
+
+class FakeCol:
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return ("eq", self.name, other)
+
+    __hash__ = None
+
+
+class FakeDF:
+    def __init__(self, rows, columns, session=None):
+        self.rows = rows
+        self.columns = columns
+        self.session = session
+
+    def filter(self, cond):
+        _, col, value = cond
+        return FakeDF([r for r in self.rows if r.get(col) == value], self.columns, self.session)
+
+    def limit(self, n):
+        return FakeDF(self.rows[:n], self.columns, self.session)
+
+    def collect(self):
+        return [types.SimpleNamespace(asDict=lambda recursive=True, r=r: dict(r)) for r in self.rows]
+
+    def createOrReplaceTempView(self, name):
+        self.session.views[name] = self
+
+
+class FakeReader:
+    def __init__(self, session):
+        self.session = session
+
+    def format(self, _fmt):
+        return self
+
+    def load(self, path):
+        self.session.loads.append(path)
+        rows = self.session.data[path]
+        return FakeDF(rows, list(rows[0].keys()) if rows else [], self.session)
+
+
+class FakeCatalog:
+    def __init__(self, session):
+        self.session = session
+
+    def tableExists(self, name):
+        return name in self.session.views
+
+    def refreshTable(self, name):
+        self.session.refreshed.append(name)
+        if self.session.refresh_error:
+            raise RuntimeError("refresh boom")
+
+
+class FakeSpark:
+    """Fake session. ``data`` maps a table path to its rows."""
+
+    def __init__(self, data):
+        self.data = data
+        self.views = {}
+        self.loads = []
+        self.queries = []
+        self.refreshed = []
+        self.refresh_error = False
+        self.read = FakeReader(self)
+        self.catalog = FakeCatalog(self)
+
+    def table(self, name):
+        df = self.views[name]
+        return FakeDF(df.rows, df.columns, self)
+
+    def sql(self, query):
+        self.queries.append(query)
+        # Resolve like Spark: every referenced view must exist.
+        names = re.findall(r"(?:FROM|JOIN)\s+(\w+)", query, flags=re.I)
+        for n in names:
+            if n not in self.views:
+                raise RuntimeError(f"[TABLE_OR_VIEW_NOT_FOUND] {n}")
+        return FakeDF(self.views[names[0]].rows, [], self)
+
+
+@pytest.fixture()
+def api(monkeypatch, tmp_path):
+    """Import lakehouse_query_api with Spark/findspark faked out."""
+    fake_pyspark = types.ModuleType("pyspark")
+    fake_sql = types.ModuleType("pyspark.sql")
+    fake_sql.SparkSession = MagicMock()
+    fake_sql.functions = types.SimpleNamespace(col=FakeCol)
+    fake_sql.types = MagicMock()
+    fake_pyspark.sql = fake_sql
+    monkeypatch.setitem(sys.modules, "pyspark", fake_pyspark)
+    monkeypatch.setitem(sys.modules, "pyspark.sql", fake_sql)
+    monkeypatch.setitem(sys.modules, "pyspark.sql.functions", fake_sql.functions)
+    monkeypatch.setitem(sys.modules, "pyspark.sql.types", fake_sql.types)
+    monkeypatch.setitem(sys.modules, "findspark", MagicMock())
+    monkeypatch.setenv("SPARK_HOME", str(tmp_path))
+    sys.modules.pop("lakehouse_query_api", None)
+    module = importlib.import_module("lakehouse_query_api")
+    yield module
+    sys.modules.pop("lakehouse_query_api", None)
+
+
+@pytest.fixture()
+def warehouse(api, tmp_path, monkeypatch):
+    """Two Gold tables on disk (alerts, conditions) and everything else missing."""
+    paths = {}
+    data = {}
+    for name in ("alerts", "conditions"):
+        p = tmp_path / name
+        p.mkdir()
+        paths[name] = str(p)
+    paths["typologies"] = str(tmp_path / "does-not-exist")
+    col = api.TENANT_ID_COLUMN
+    data[paths["alerts"]] = [{col: "A", "id": 1}, {col: "B", "id": 2}]
+    data[paths["conditions"]] = [{col: "A", "id": 1}, {col: "A", "id": 2}, {col: "B", "id": 3}]
+    monkeypatch.setattr(api, "GOLD_PATHS", paths)
+    return paths, data
+
+
+def use_session(api, monkeypatch, data):
+    spark = FakeSpark(data)
+    monkeypatch.setattr(api, "get_spark", lambda: spark)
+    return spark
+
+
+def test_registers_once_across_many_calls(api, warehouse, monkeypatch):
+    paths, data = warehouse
+    spark = use_session(api, monkeypatch, data)
+
+    for _ in range(100):
+        api._execute_sql_sync("SELECT * FROM alerts", "A")
+
+    assert sorted(spark.loads) == sorted([paths["alerts"], paths["conditions"]])
+
+
+def test_reregisters_when_session_is_recreated(api, warehouse, monkeypatch):
+    _, data = warehouse
+    first = use_session(api, monkeypatch, data)
+    api._execute_sql_sync("SELECT * FROM alerts", "A")
+
+    second = use_session(api, monkeypatch, data)  # simulates get_spark() recreating the session
+    rows = api._execute_sql_sync("SELECT * FROM alerts", "A")
+
+    assert len(first.loads) == 2
+    assert len(second.loads) == 2
+    assert len(rows) == 1
+
+
+def test_missing_path_warns_once_per_session(api, warehouse, monkeypatch, caplog):
+    _, data = warehouse
+    use_session(api, monkeypatch, data)
+    with caplog.at_level(logging.WARNING, logger="pipeline"):
+        for _ in range(20):
+            api._execute_sql_sync("SELECT * FROM alerts", "A")
+
+    warnings = [r for r in caplog.records if "typologies" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_only_referenced_tables_are_refreshed(api, warehouse, monkeypatch):
+    _, data = warehouse
+    spark = use_session(api, monkeypatch, data)
+
+    api._execute_sql_sync("SELECT * FROM conditions", "A")
+    api._execute_sql_sync("SELECT * FROM alerts a JOIN conditions c ON a.id = c.id", "A")
+
+    assert spark.refreshed == ["conditions", "alerts", "conditions"]
+
+
+def test_refresh_failure_falls_back_to_reload(api, warehouse, monkeypatch):
+    paths, data = warehouse
+    spark = use_session(api, monkeypatch, data)
+    api._execute_sql_sync("SELECT * FROM alerts", "A")  # registers (2 loads)
+    spark.refresh_error = True
+
+    rows = api._execute_sql_sync("SELECT * FROM alerts", "A")
+
+    assert len(rows) == 1
+    assert spark.loads.count(paths["alerts"]) == 2  # registration + fallback reload
+
+
+def test_tenant_filter_applied(api, warehouse, monkeypatch):
+    _, data = warehouse
+    use_session(api, monkeypatch, data)
+
+    assert len(api._execute_sql_sync("SELECT * FROM conditions", "A")) == 2
+    assert len(api._execute_sql_sync("SELECT * FROM conditions", "B")) == 1
+
+
+def test_concurrent_tenants_do_not_leak(api, warehouse, monkeypatch):
+    _, data = warehouse
+    use_session(api, monkeypatch, data)
+    results = {}
+
+    def run(tenant, i):
+        results[(tenant, i)] = api._execute_sql_sync("SELECT * FROM conditions", tenant)
+
+    threads = [threading.Thread(target=run, args=(t, i)) for i in range(10) for t in ("A", "B")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    for (tenant, _), rows in results.items():
+        assert {r[api.TENANT_ID_COLUMN] for r in rows} == {tenant}
+
+
+def test_limit_applied(api, warehouse, monkeypatch):
+    _, data = warehouse
+    use_session(api, monkeypatch, data)
+    assert len(api._execute_sql_sync("SELECT * FROM conditions", "A", limit=1)) == 1
+
+
+def test_absent_table_still_reports_original_name(api, warehouse, monkeypatch):
+    _, data = warehouse
+    use_session(api, monkeypatch, data)
+    with pytest.raises(RuntimeError, match="typologies") as exc:
+        api._execute_sql_sync("SELECT * FROM typologies", "A")
+    assert "__tenant_" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        (
+            "SELECT * FROM conditions WHERE account_id = 'X'",
+            "SELECT * FROM __tenant_conditions WHERE account_id = 'X'",
+        ),
+        (
+            "SELECT c.id FROM conditions c JOIN alerts a ON a.id = c.id",
+            "SELECT c.id FROM __tenant_conditions c JOIN __tenant_alerts a ON a.id = c.id",
+        ),
+        (
+            "SELECT * FROM (SELECT id FROM alerts) t",
+            "SELECT * FROM (SELECT id FROM __tenant_alerts) t",
+        ),
+        (
+            "WITH x AS (SELECT * FROM conditions) SELECT * FROM x",
+            "WITH x AS (SELECT * FROM __tenant_conditions) SELECT * FROM x",
+        ),
+        (
+            "SELECT * FROM alerts WHERE note = 'from conditions it''s'",
+            "SELECT * FROM __tenant_alerts WHERE note = 'from conditions it''s'",
+        ),
+        (
+            "SELECT conditions.id FROM conditions",
+            "SELECT __tenant_conditions.id FROM __tenant_conditions",
+        ),
+        ("SELECT * FROM my_alerts", "SELECT * FROM my_alerts"),
+    ],
+)
+def test_rewrite_table_refs(api, query, expected):
+    assert api._rewrite_table_refs(query, ["alerts", "conditions"]) == expected
+
+
+def test_rewrite_is_not_applied_twice(api):
+    q = "SELECT * FROM __tenant_alerts"
+    assert api._rewrite_table_refs(q, ["alerts"]) == q

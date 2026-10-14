@@ -384,26 +384,93 @@ def _get_hudi_data_sync(
     return [row.asDict(recursive=True) for row in df.collect()]
 
 
+_registered_session: Optional[SparkSession] = None
+_registration_lock = threading.Lock()
+
+
+def _register_all_hudi_tables(spark: SparkSession) -> None:
+    """
+    Register every on-disk GOLD_PATHS entry as a tenant-agnostic temp view.
+    Called once per Spark session so the catalog invariant is owned by the
+    session lifecycle, not by individual requests. Tenant filtering is applied
+    per request in _execute_sql_sync.
+    """
+    for tname, path in GOLD_PATHS.items():
+        if os.path.isdir(path):
+            try:
+                spark.read.format("hudi").load(path).createOrReplaceTempView(tname)
+            except Exception as exc:
+                logger.error(f"Failed to register '{tname}' at '{path}': {exc}")
+        else:
+            logger.warning(f"Path for table '{tname}' not found: {path}")
+
+
+def _ensure_registered(spark: SparkSession) -> None:
+    global _registered_session
+    with _registration_lock:
+        # Compare the object, not id(): ids can be reused once the old session is freed.
+        if _registered_session is not spark:
+            _register_all_hudi_tables(spark)
+            _registered_session = spark
+
+
+def _rewrite_table_refs(sql_query: str, tables) -> str:
+    """
+    Point references to the given table names at their tenant-filtered views
+    (``__tenant_<name>``). Single-quoted string literals are left untouched.
+    """
+    if not tables:
+        return sql_query
+    names = "|".join(re.escape(t) for t in sorted(tables, key=len, reverse=True))
+    pattern = re.compile(rf"('(?:[^'\\]|\\.|'')*')|\b({names})\b")
+    return pattern.sub(
+        lambda m: m.group(1) if m.group(1) else f"__tenant_{m.group(2)}",
+        sql_query,
+    )
+
+
+def _references_table(sql_query: str, tname: str) -> bool:
+    return re.search(rf"\b{re.escape(tname)}\b", sql_query) is not None
+
+
+def _refresh_view(spark: SparkSession, tname: str) -> None:
+    """
+    Pick up Hudi commits made since the view was registered. Only the tables a
+    query actually references are refreshed, so the cost stays per-query
+    rather than per-table-in-GOLD_PATHS. On failure the view is reloaded.
+    """
+    try:
+        spark.catalog.refreshTable(tname)
+    except Exception as exc:
+        logger.warning(f"refreshTable failed for '{tname}' ({exc}); reloading.")
+        spark.read.format("hudi").load(GOLD_PATHS[tname]).createOrReplaceTempView(tname)
+
+
 def _execute_sql_sync(sql_query: str, tenant_id: str, limit: int = None):
     """
-    Serialised temp-view registration + SQL execution.
-    Each table view is pre-filtered to the caller's tenant_id before
-    being registered, so the SQL query automatically sees only that
-    tenant's rows regardless of what the caller writes.
+    Run SQL against the Gold tables. Base Hudi views are registered once per
+    Spark session and refreshed per query for the tables it references; each
+    call layers tenant-filtered views (``__tenant_<name>``) on top and rewrites the query to use them, so the caller only ever sees
+    its own tenant's rows. The lock serialises the shared view names and the
+    query that uses them.
     """
     spark = get_spark()
-    with _sql_lock:
-        for tname, path in GOLD_PATHS.items():
-            if os.path.isdir(path):
-                tdf = spark.read.format("hudi").load(path)
-                # Apply tenant filter when the column exists
-                if TENANT_ID_COLUMN in tdf.columns:
-                    tdf = tdf.filter(F.col(TENANT_ID_COLUMN) == tenant_id)
-                tdf.createOrReplaceTempView(tname)
-            else:
-                logger.warning(f"Path for table '{tname}' not found: {path}")
+    _ensure_registered(spark)
 
-        df = spark.sql(sql_query)
+    with _sql_lock:
+        available = []
+        for tname in GOLD_PATHS:
+            if not spark.catalog.tableExists(tname):
+                continue
+            if _references_table(sql_query, tname):
+                _refresh_view(spark, tname)
+            base = spark.table(tname)
+            if TENANT_ID_COLUMN in base.columns:
+                base = base.filter(F.col(TENANT_ID_COLUMN) == tenant_id)
+            base.createOrReplaceTempView(f"__tenant_{tname}")
+            available.append(tname)
+
+        df = spark.sql(_rewrite_table_refs(sql_query, available))
 
         if limit:
             df = df.limit(limit)
