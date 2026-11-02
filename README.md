@@ -46,7 +46,7 @@ flowchart LR
 | **nifi** | Apache NiFi 1.24.0 with the Tazama flow template (`tazama.xml`). Polls the source tables, writes JSON files to Ozone and triggers the orchestrator. | 8088 (HTTP) / 8443 (HTTPS), 8081 |
 | **automation-orchestrator** | FastAPI + PySpark service. Receives `/checksubmit` from NiFi, queues ETL jobs, writes Hudi Bronze/Silver/Gold tables and rebuilds the views. | 7619 |
 | **datalakehouse-api** | FastAPI + PySpark query API. Verifies the caller's JWT (`QUERY_LAKEHOUSE` claim) and filters every query to the caller's tenant. | 8282 |
-| **JupyterHub** | Multi-user JupyterLab environment with pre-built analytics dashboards. Keycloak or native login. | 8000 |
+| **JupyterHub** | Multi-user JupyterLab environment with pre-built analytics dashboards. Keycloak or native login. | 8888 |
 | **unstructured-pipeline** | TypeScript cron job: reads CMS evidence from CouchDB, decrypts it, extracts text with Tika, indexes it in Solr and forwards it to NiFi. | — |
 
 Supporting services started by Docker Compose: Apache Ozone (SCM, OM, three datanodes, Recon, S3 Gateway), Apache Tika, Apache Solr and the `aws-cli` / `nifi-init` initialisation containers.
