@@ -74,7 +74,9 @@ else:
 
     import contextvars
     import json
+    from urllib.parse import urlencode
 
+    from oauthenticator.oauth2 import OAuthLogoutHandler
     from tornado.httpclient import HTTPClientError
 
     # Set by get_token_info only when Keycloak confirms the refresh token is
@@ -95,6 +97,67 @@ else:
         except (ValueError, AttributeError):
             return ""
 
+    class KeycloakLogoutHandler(OAuthLogoutHandler):
+        """Logout handler that also ends the user's Keycloak SSO session.
+
+        The stock handler only clears the hub's own cookies. The browser keeps
+        its Keycloak session cookie, so the next "Sign in with Keycloak" is
+        answered by Keycloak without a credential prompt and the previous user
+        is silently signed back in (tazama-lf/biar#215). Here the hub ends the
+        Keycloak session server-to-server with the user's refresh token, so no
+        Keycloak confirmation page is shown.
+
+        Ending the session also invalidates the stored refresh token: if the
+        user's server is left running, its next auth refresh gets invalid_grant
+        and KeycloakOAuthenticator.refresh_user stops it.
+        """
+
+        async def handle_logout(self):
+            # JupyterHub has already cleared the hub login cookie here, but
+            # current_user is still set until the logout page is rendered.
+            user = self.current_user
+            if user is not None:
+                await self._end_keycloak_session(user)
+            # Clears the OAuth state cookie.
+            await super().handle_logout()
+
+        async def _end_keycloak_session(self, user):
+            auth_state = await user.get_auth_state() or {}
+            refresh_token = auth_state.get("refresh_token")
+            if not refresh_token:
+                self.log.info(
+                    f"No refresh_token in auth_state for {user.name}; "
+                    "clearing local cookies only"
+                )
+                return
+            authenticator = self.authenticator
+            try:
+                await authenticator.httpfetch(
+                    f"{KC_BASE}/protocol/openid-connect/logout",
+                    label="ending Keycloak session",
+                    parse_json=False,
+                    method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    body=urlencode(
+                        {
+                            "client_id": authenticator.client_id,
+                            "client_secret": authenticator.client_secret,
+                            "refresh_token": refresh_token,
+                        }
+                    ),
+                    request_timeout=10,
+                )
+            except (HTTPClientError, OSError) as e:
+                # Never block logout on Keycloak: the hub cookies are already
+                # cleared, the user just keeps their Keycloak session.
+                code = getattr(e, "code", type(e).__name__)
+                self.log.warning(
+                    f"Keycloak end-session failed for {user.name} ({code}); "
+                    "local cookies cleared anyway"
+                )
+                return
+            self.log.info(f"Ended Keycloak session for {user.name}")
+
     class KeycloakOAuthenticator(GenericOAuthenticator):
         """GenericOAuthenticator that ends the session when Keycloak revokes it.
 
@@ -104,7 +167,12 @@ else:
         call retries the dead refresh token, forever (tazama-lf/biar#209).
         Here we stop the user's servers and clear the hub cookie instead, so
         the next visit goes through a fresh Keycloak login.
+
+        Logging out of JupyterHub also ends the Keycloak session, see
+        KeycloakLogoutHandler (tazama-lf/biar#215).
         """
+
+        logout_handler = KeycloakLogoutHandler
 
         async def get_token_info(self, handler, params):
             try:
