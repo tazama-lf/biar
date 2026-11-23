@@ -28,18 +28,22 @@ fi
 
 echo "NiFi API is ready"
 
+# Core (five Tazama core DBs) and CMS (tazama_cms) are separate PostgreSQL
+# instances, so each has its own host, port, user and password.
 CORE_PG_HOST="${CORE_PG_HOST:-}"
 CORE_PG_PORT="${CORE_PG_PORT:-15432}"
+CORE_PG_USER="${CORE_PG_USER:-postgres}"
+CORE_PG_PASSWORD="${CORE_PG_PASSWORD:-}"
 CMS_PG_HOST="${CMS_PG_HOST:-}"
 CMS_PG_PORT="${CMS_PG_PORT:-15433}"
-PG_USER="${PG_USER:-postgres}"
-PG_PASSWORD="${PG_PASSWORD:-}"
+CMS_PG_USER="${CMS_PG_USER:-postgres}"
+CMS_PG_PASSWORD="${CMS_PG_PASSWORD:-}"
 S3A_ACCESS_KEY="${S3A_ACCESS_KEY:-}"
 S3A_SECRET_KEY="${S3A_SECRET_KEY:-}"
 
 # Build the full parameter list (JSON fragments) from environment variables.
-# Sensitive parameters (pg_password, ozone keys) are stored encrypted by NiFi
-# and are never returned by the REST API once set.
+# Sensitive parameters (core/cms passwords, ozone keys) are stored encrypted by
+# NiFi and are never returned by the REST API once set.
 # Values are JSON-escaped with a sed pass because user-supplied secrets may
 # contain quotes or backslashes, and the runtime image (curlimages/curl) does
 # not ship jq.
@@ -64,10 +68,12 @@ add_param_fragment "$PB_HTTP_NAME" "$PB_HTTP_VALUE" "$PB_SENSITIVE_FALSE"
 add_param_fragment "$PB_OZONE_NAME" "$PB_OZONE_ENDPOINT" "$PB_SENSITIVE_FALSE"
 add_param_fragment "core_pg_host" "$CORE_PG_HOST" false
 add_param_fragment "core_pg_port" "$CORE_PG_PORT" false
+add_param_fragment "core_pg_user" "$CORE_PG_USER" false
+add_param_fragment "core_pg_password" "$CORE_PG_PASSWORD" true
 add_param_fragment "cms_pg_host" "$CMS_PG_HOST" false
 add_param_fragment "cms_pg_port" "$CMS_PG_PORT" false
-add_param_fragment "pg_user" "$PG_USER" false
-add_param_fragment "pg_password" "$PG_PASSWORD" true
+add_param_fragment "cms_pg_user" "$CMS_PG_USER" false
+add_param_fragment "cms_pg_password" "$CMS_PG_PASSWORD" true
 add_param_fragment "ozone_access_key" "$S3A_ACCESS_KEY" true
 add_param_fragment "ozone_secret_key" "$S3A_SECRET_KEY" true
 
@@ -159,10 +165,12 @@ ensure_param "$PB_HTTP_NAME" "$PB_HTTP_VALUE" "$PB_SENSITIVE_FALSE"
 ensure_param "$PB_OZONE_NAME" "$PB_OZONE_ENDPOINT" "$PB_SENSITIVE_FALSE"
 ensure_param "core_pg_host" "$CORE_PG_HOST" false
 ensure_param "core_pg_port" "$CORE_PG_PORT" false
+ensure_param "core_pg_user" "$CORE_PG_USER" false
+ensure_param "core_pg_password" "$CORE_PG_PASSWORD" true
 ensure_param "cms_pg_host" "$CMS_PG_HOST" false
 ensure_param "cms_pg_port" "$CMS_PG_PORT" false
-ensure_param "pg_user" "$PG_USER" false
-ensure_param "pg_password" "$PG_PASSWORD" true
+ensure_param "cms_pg_user" "$CMS_PG_USER" false
+ensure_param "cms_pg_password" "$CMS_PG_PASSWORD" true
 ensure_param "ozone_access_key" "$S3A_ACCESS_KEY" true
 ensure_param "ozone_secret_key" "$S3A_SECRET_KEY" true
 

@@ -4629,11 +4629,11 @@
                 </entry>
                 <entry>
                     <key>Database User</key>
-                    <value>#{pg_user}</value>
+                    <value>#{core_pg_user}</value>
                 </entry>
                 <entry>
                     <key>Password</key>
-                    <value>#{pg_password}</value>
+                    <value>#{core_pg_password}</value>
                 </entry>
                 <entry>
                     <key>Max Wait Time</key>
@@ -5043,11 +5043,11 @@
                 </entry>
                 <entry>
                     <key>Database User</key>
-                    <value>#{pg_user}</value>
+                    <value>#{core_pg_user}</value>
                 </entry>
                 <entry>
                     <key>Password</key>
-                    <value>#{pg_password}</value>
+                    <value>#{core_pg_password}</value>
                 </entry>
                 <entry>
                     <key>Max Wait Time</key>
@@ -5672,11 +5672,11 @@
                 </entry>
                 <entry>
                     <key>Database User</key>
-                    <value>#{pg_user}</value>
+                    <value>#{cms_pg_user}</value>
                 </entry>
                 <entry>
                     <key>Password</key>
-                    <value>#{pg_password}</value>
+                    <value>#{cms_pg_password}</value>
                 </entry>
                 <entry>
                     <key>Max Wait Time</key>
@@ -5869,11 +5869,11 @@
                 </entry>
                 <entry>
                     <key>Database User</key>
-                    <value>#{pg_user}</value>
+                    <value>#{core_pg_user}</value>
                 </entry>
                 <entry>
                     <key>Password</key>
-                    <value>#{pg_password}</value>
+                    <value>#{core_pg_password}</value>
                 </entry>
                 <entry>
                     <key>Max Wait Time</key>
@@ -6066,11 +6066,11 @@
                 </entry>
                 <entry>
                     <key>Database User</key>
-                    <value>#{pg_user}</value>
+                    <value>#{core_pg_user}</value>
                 </entry>
                 <entry>
                     <key>Password</key>
-                    <value>#{pg_password}</value>
+                    <value>#{core_pg_password}</value>
                 </entry>
                 <entry>
                     <key>Max Wait Time</key>
@@ -6263,11 +6263,11 @@
                 </entry>
                 <entry>
                     <key>Database User</key>
-                    <value>#{pg_user}</value>
+                    <value>#{core_pg_user}</value>
                 </entry>
                 <entry>
                     <key>Password</key>
-                    <value>#{pg_password}</value>
+                    <value>#{core_pg_password}</value>
                 </entry>
                 <entry>
                     <key>Max Wait Time</key>
