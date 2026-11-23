@@ -35,4 +35,5 @@ export interface IEvidenceDocument {
   processingStatus?: string;
   processedAt?: string;
   lastError?: string;
+  retryCount?: number;
 }

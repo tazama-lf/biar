@@ -30,7 +30,7 @@ export class CouchDBService {
         selector: {
           $or: [
             { processingStatus: { $exists: false } },
-            { processingStatus: { $ne: 'COMPLETED' } },
+            { processingStatus: { $nin: ['COMPLETED', 'FAILED'] } },
           ],
           archive: { $ne: true },
           _attachments: { $exists: true },
@@ -71,6 +71,7 @@ export class CouchDBService {
     documentId: string,
     status: string,
     errorMessage?: string,
+    retryCount?: number,
     retries = DEFAULT_RETRIES
   ): Promise<void> {
     for (let attempt = 1; attempt <= retries; attempt++) {
@@ -82,6 +83,7 @@ export class CouchDBService {
           processingStatus: status,
           processedAt: new Date().toISOString(),
           ...(errorMessage && { lastError: errorMessage }),
+          ...(retryCount !== undefined && { retryCount }),
         };
         await axios.put(this.baseUrl + '/' + documentId, updatedDoc, {
           headers: { 'Content-Type': 'application/json' },

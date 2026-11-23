@@ -1,4 +1,5 @@
 import { createCipheriv, randomBytes } from 'crypto';
+import { AxiosError, type AxiosResponse } from 'axios';
 
 const mockCouchDB = {
   getAllDocs: jest.fn(),
@@ -27,6 +28,7 @@ const mockDecryption = {
 jest.mock('@tazama-lf/frms-coe-lib', () => {
   class MockLoggerService {
     log = jest.fn();
+    warn = jest.fn();
     error = jest.fn();
   }
   return { LoggerService: MockLoggerService };
@@ -174,11 +176,15 @@ describe('DocumentProcessor', () => {
       expect(mockCouchDB.findUnprocessedDocs).toHaveBeenCalled();
       expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
         'doc1',
-        'COMPLETED'
+        'COMPLETED',
+        undefined,
+        0
       );
       expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
         'doc2',
-        'COMPLETED'
+        'COMPLETED',
+        undefined,
+        0
       );
     });
 
@@ -270,7 +276,9 @@ describe('DocumentProcessor', () => {
       );
       expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
         'doc1',
-        'COMPLETED'
+        'COMPLETED',
+        undefined,
+        0
       );
     });
 
@@ -390,7 +398,8 @@ describe('DocumentProcessor', () => {
       expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
         'doc1',
         'ERROR',
-        expect.stringContaining('File too large')
+        expect.stringContaining('File too large'),
+        1
       );
       expect(mockTika.extract).not.toHaveBeenCalled();
     });
@@ -407,7 +416,8 @@ describe('DocumentProcessor', () => {
       expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
         'doc1',
         'ERROR',
-        'No attachments found'
+        'No attachments found',
+        1
       );
     });
 
@@ -426,7 +436,8 @@ describe('DocumentProcessor', () => {
       expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
         'doc1',
         'ERROR',
-        'Attachment not found'
+        'Attachment not found',
+        1
       );
     });
 
@@ -444,7 +455,8 @@ describe('DocumentProcessor', () => {
       expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
         'doc1',
         'ERROR',
-        'Tika server unavailable'
+        'Tika server unavailable',
+        1
       );
     });
 
@@ -463,7 +475,8 @@ describe('DocumentProcessor', () => {
       expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
         'doc1',
         'ERROR',
-        'Solr error'
+        'Solr error',
+        1
       );
     });
 
@@ -486,6 +499,255 @@ describe('DocumentProcessor', () => {
         'doc1',
         'ERROR',
         'NiFi connection failed'
+      );
+    });
+  });
+
+  describe('retry limit and service outages', () => {
+    const networkError = (code: string) =>
+      new AxiosError(`connect ${code}`, code);
+    const httpError = (status: number) =>
+      new AxiosError(
+        `Request failed with status code ${status}`,
+        'ERR_BAD_RESPONSE',
+        undefined,
+        undefined,
+        {
+          status,
+          statusText: '',
+          headers: {},
+          data: {},
+        } as unknown as AxiosResponse
+      );
+    const loggerOf = (processor: unknown) =>
+      (processor as { logger: { warn: jest.Mock; error: jest.Mock } }).logger;
+
+    const mockSuccessfulServices = () => {
+      mockCouchDB.getAttachment.mockResolvedValue(Buffer.from('content'));
+      mockTika.extract.mockResolvedValue({ text: 'text', metadata: {} });
+      mockSolr.indexDocument.mockResolvedValue(undefined);
+      mockNifi.sendDocument.mockResolvedValue(undefined);
+      mockCouchDB.updateStatus.mockResolvedValue(undefined);
+    };
+
+    it('counts each document error and keeps the document eligible', async () => {
+      mockCouchDB.findUnprocessedDocs.mockResolvedValue([
+        createValidDoc({ _attachments: {}, retryCount: 1 }),
+      ]);
+      mockCouchDB.updateStatus.mockResolvedValue(undefined);
+
+      await getProcessor().run();
+
+      expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
+        'doc1',
+        'ERROR',
+        'No attachments found',
+        2
+      );
+    });
+
+    it('marks a document FAILED on its third document error', async () => {
+      mockCouchDB.findUnprocessedDocs.mockResolvedValue([
+        createValidDoc({ _attachments: {}, retryCount: 2 }),
+      ]);
+      mockCouchDB.updateStatus.mockResolvedValue(undefined);
+
+      await getProcessor().run();
+
+      expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
+        'doc1',
+        'FAILED',
+        'No attachments found',
+        3
+      );
+    });
+
+    it('resets retryCount when a previously failing document succeeds', async () => {
+      mockCouchDB.findUnprocessedDocs.mockResolvedValue([
+        createValidDoc({ retryCount: 2 }),
+      ]);
+      mockSuccessfulServices();
+
+      await getProcessor().run();
+
+      expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
+        'doc1',
+        'COMPLETED',
+        undefined,
+        0
+      );
+    });
+
+    it('does not count a service outage against the document and ends the run', async () => {
+      mockCouchDB.findUnprocessedDocs.mockResolvedValue([
+        createValidDoc({ _id: 'doc1', retryCount: 2 }),
+        createValidDoc({ _id: 'doc2' }),
+      ]);
+      mockCouchDB.getAttachment.mockRejectedValue(networkError('ECONNREFUSED'));
+      mockCouchDB.updateStatus.mockResolvedValue(undefined);
+
+      const processor = getProcessor();
+      await processor.run();
+
+      // ERROR without an attempt count, even though the document already
+      // has two document errors: an outage never makes it FAILED.
+      expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
+        'doc1',
+        'ERROR',
+        'connect ECONNREFUSED',
+        undefined
+      );
+      expect(mockCouchDB.updateStatus).not.toHaveBeenCalledWith(
+        'doc1',
+        'FAILED',
+        expect.anything(),
+        expect.anything()
+      );
+      // The run stops at the first outage; doc2 is left for a later run.
+      expect(mockCouchDB.getAttachment).toHaveBeenCalledTimes(1);
+      expect(mockCouchDB.updateStatus).not.toHaveBeenCalledWith(
+        'doc2',
+        expect.anything()
+      );
+      expect(loggerOf(processor).warn).toHaveBeenCalledWith(
+        expect.stringContaining('pausing processing for 30 s'),
+        'run'
+      );
+    });
+
+    it.each([
+      ['connection refused', networkError('ECONNREFUSED')],
+      ['host not found', networkError('ENOTFOUND')],
+      ['connect timeout', networkError('ETIMEDOUT')],
+      ['HTTP 401', httpError(401)],
+      ['HTTP 403', httpError(403)],
+      ['HTTP 429', httpError(429)],
+      ['HTTP 503', httpError(503)],
+    ])('treats %s as a service outage', async (_label, error) => {
+      mockCouchDB.findUnprocessedDocs.mockResolvedValue([createValidDoc()]);
+      mockCouchDB.getAttachment.mockResolvedValue(Buffer.from('content'));
+      mockTika.extract.mockRejectedValue(error);
+      mockCouchDB.updateStatus.mockResolvedValue(undefined);
+
+      await getProcessor().run();
+
+      expect(mockCouchDB.updateStatus).toHaveBeenLastCalledWith(
+        'doc1',
+        'ERROR',
+        error.message,
+        undefined
+      );
+    });
+
+    it.each([
+      ['HTTP 400', httpError(400)],
+      ['HTTP 500', httpError(500)],
+      ['a response timeout', networkError('ECONNABORTED')],
+      ['a connection reset', networkError('ECONNRESET')],
+      [
+        'a decryption failure',
+        new Error('Unsupported state or unable to authenticate data'),
+      ],
+    ])('treats %s as a document error', async (_label, error) => {
+      mockCouchDB.findUnprocessedDocs.mockResolvedValue([createValidDoc()]);
+      mockCouchDB.getAttachment.mockResolvedValue(Buffer.from('content'));
+      mockTika.extract.mockRejectedValue(error);
+      mockCouchDB.updateStatus.mockResolvedValue(undefined);
+
+      await getProcessor().run();
+
+      expect(mockCouchDB.updateStatus).toHaveBeenLastCalledWith(
+        'doc1',
+        'ERROR',
+        error.message,
+        1
+      );
+    });
+
+    it('pauses runs with exponential backoff while a service is down', async () => {
+      const now = jest.spyOn(Date, 'now');
+      mockCouchDB.findUnprocessedDocs.mockRejectedValue(httpError(401));
+      const processor = getProcessor();
+      const { warn, error } = loggerOf(processor);
+
+      now.mockReturnValue(0);
+      await processor.run();
+      expect(warn).toHaveBeenLastCalledWith(
+        expect.stringContaining('pausing processing for 30 s'),
+        'run'
+      );
+
+      // Still paused: the next scheduled run does not touch CouchDB.
+      now.mockReturnValue(29_999);
+      await processor.run();
+      expect(mockCouchDB.findUnprocessedDocs).toHaveBeenCalledTimes(1);
+
+      // Each further outage doubles the pause, up to 10 minutes.
+      let t = 30_000;
+      for (const seconds of [60, 120, 240, 480, 600, 600]) {
+        now.mockReturnValue(t);
+        await processor.run();
+        expect(warn).toHaveBeenLastCalledWith(
+          expect.stringContaining(`pausing processing for ${seconds} s`),
+          'run'
+        );
+        t += seconds * 1000;
+      }
+      expect(error).not.toHaveBeenCalledWith(
+        expect.stringContaining('Job failed'),
+        expect.anything(),
+        'run'
+      );
+    });
+
+    it('resumes and resets the backoff once the service is back', async () => {
+      const now = jest.spyOn(Date, 'now');
+      const processor = getProcessor();
+      const { warn } = loggerOf(processor);
+
+      mockCouchDB.findUnprocessedDocs.mockRejectedValueOnce(
+        networkError('ECONNREFUSED')
+      );
+      now.mockReturnValue(0);
+      await processor.run();
+
+      mockCouchDB.findUnprocessedDocs.mockResolvedValueOnce([createValidDoc()]);
+      mockSuccessfulServices();
+      now.mockReturnValue(30_000);
+      await processor.run();
+      expect(mockCouchDB.updateStatus).toHaveBeenCalledWith(
+        'doc1',
+        'COMPLETED',
+        undefined,
+        0
+      );
+
+      // A new outage starts again from the base delay.
+      mockCouchDB.findUnprocessedDocs.mockRejectedValueOnce(
+        networkError('ECONNREFUSED')
+      );
+      now.mockReturnValue(60_000);
+      await processor.run();
+      expect(warn).toHaveBeenLastCalledWith(
+        expect.stringContaining('pausing processing for 30 s'),
+        'run'
+      );
+    });
+
+    it('still logs non-outage job failures without pausing', async () => {
+      mockCouchDB.findUnprocessedDocs.mockRejectedValue(httpError(400));
+      const processor = getProcessor();
+      const { warn, error } = loggerOf(processor);
+
+      await processor.run();
+      await processor.run();
+
+      expect(mockCouchDB.findUnprocessedDocs).toHaveBeenCalledTimes(2);
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).toHaveBeenCalledWith(
+        'Job failed: Request failed with status code 400',
+        expect.anything(),
+        'run'
       );
     });
   });

@@ -97,13 +97,60 @@ npm start
 
 ## Document Processing Flow
 
-1. **Fetch**: Get unprocessed documents from CouchDB (status != COMPLETED, not archived)
+1. **Fetch**: Get unprocessed documents from CouchDB (status not COMPLETED or FAILED, not archived)
 2. **Validate**: Check file size against `MAX_FILE_SIZE_MB` limit
 3. **Decrypt**: If file has encryption metadata, decrypt using AES-256-GCM
 4. **Extract**: Send file to Tika for text and metadata extraction
 5. **Index**: Store extracted content in Solr (truncated to `MAX_SOLR_CONTENT`)
 6. **Forward**: Send full content and metadata to NiFi
 7. **Update**: Mark document as COMPLETED in CouchDB
+
+## Failures and retries
+
+Every failure is either a service outage or a document error. Accepted file formats for each evidence type are enforced by the case management system when evidence is uploaded, so the processor does not check them.
+
+### Service outage (not counted)
+
+CouchDB, Tika or Solr cannot be reached (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`), or answers HTTP 401, 403, 408, 429, 502, 503 or 504.
+
+The document is marked `ERROR` but the attempt is **not** counted. The run stops, because every remaining document would fail the same way. Runs are paused for 30 s, doubling per consecutive outage up to 10 min, and resume on their own once the service is back.
+
+### Document errors (counted)
+
+| Step       | Cause                                                                    | `lastError`                                                                                     |
+| ---------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| Checks     | The document has no attachment                                           | `No attachments found`                                                                          |
+| Checks     | The document has no file metadata                                        | `Document metadata missing`                                                                     |
+| Checks     | The file is larger than `MAX_FILE_SIZE_MB`                               | `File too large: <size>MB`                                                                      |
+| Download   | The attachment is missing in CouchDB                                     | `Request failed with status code 404`                                                           |
+| Decryption | Wrong key, IV or auth tag, or the file is corrupted                      | `Unsupported state or unable to authenticate data`                                              |
+| Decryption | Malformed key, IV or auth tag                                            | `Invalid key length`, `Invalid initialization vector`, `Invalid authentication tag length: <n>` |
+| Tika       | The file cannot be parsed (corrupt, password-protected, unknown content) | `Request failed with status code 422` (also 415 or 500)                                         |
+| Tika       | Extraction takes longer than `TIKA_TIMEOUT`                              | `timeout of <TIKA_TIMEOUT>ms exceeded`                                                          |
+| Solr       | Solr rejects the document, for example a field over its size limit       | `Request failed with status code 400` (also 500)                                                |
+| Any        | The connection is reset while a request is in flight                     | `socket hang up` or `read ECONNRESET`                                                           |
+
+Each document error increments `retryCount` and stores `lastError`. On the 3rd one the document is marked `FAILED` and is no longer selected. Processing carries on with the next document.
+
+A NiFi failure is not counted: it is logged and the document is still completed.
+
+A successful run resets `retryCount` to 0. `FAILED` documents are kept in CouchDB.
+
+List `FAILED` documents (`COUCHDB_URL` as configured for the processor):
+
+```bash
+curl -s -X POST "$COUCHDB_URL/_find" -H 'Content-Type: application/json' \
+  -d '{"selector": {"processingStatus": "FAILED"}, "fields": ["_id", "evidenceId", "retryCount", "lastError", "processedAt"]}'
+```
+
+Once the cause is fixed, reset a document so it is processed again with a fresh set of attempts (requires `jq`):
+
+```bash
+DOC_ID=<document _id>
+curl -s "$COUCHDB_URL/$DOC_ID" \
+  | jq '.processingStatus = "ERROR" | .retryCount = 0' \
+  | curl -s -X PUT "$COUCHDB_URL/$DOC_ID" -H 'Content-Type: application/json' -d @-
+```
 
 ## Testing
 
