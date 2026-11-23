@@ -104,12 +104,12 @@ echo "Fetching Parameter Context ID..."
 
 # Retry until context appears
 for i in $(seq 1 10); do
+  # Match the context entity itself: its component starts with "name", unlike
+  # the referencing components and bound process groups NiFi nests inside it
+  # once a flow uses the context (their ids would otherwise be picked up).
   PARAM_CONTEXT_ID=$(curl -s "$BASE_URL/flow/parameter-contexts" \
     | tr -d '\n' \
-    | sed 's/.*"parameterContexts":\[\(.*\)\].*/\1/' \
-    | sed 's/},{/}\n{/g' \
-    | grep "\"name\":\"$PB_CONTEXT_NAME\"" \
-    | sed 's/.*"id":"\([^"]*\)".*/\1/' \
+    | sed -n "s/.*\"id\":\"\([^\"]*\)\",\"permissions\":{[^}]*},\"component\":{\"name\":\"$PB_CONTEXT_NAME\",.*/\1/p" \
     | head -n 1)
 
   if [ -n "$PARAM_CONTEXT_ID" ]; then
@@ -175,9 +175,11 @@ ensure_param "ozone_access_key" "$S3A_ACCESS_KEY" true
 ensure_param "ozone_secret_key" "$S3A_SECRET_KEY" true
 
 if [ "$PARAMS_UPDATED" = "true" ]; then
+  # The context's own revision is the first one in the body; later ones belong
+  # to referencing components.
   CONTEXT_REVISION_VERSION=$(echo "$CONTEXT_BODY" \
     | tr -d '\n' \
-    | sed -n 's/.*"revision":[[:space:]]*{[^}]*"version":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    | sed -n 's/^[[:space:]]*{[[:space:]]*"revision":[[:space:]]*{[^}]*"version":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
     | head -n 1)
 
   if [ -z "$CONTEXT_REVISION_VERSION" ]; then
