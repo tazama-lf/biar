@@ -107,7 +107,7 @@ npm start
 
 ## Failures and retries
 
-Every failure is either a service outage or a document error. Accepted file formats for each evidence type are enforced by the case management system when evidence is uploaded, so the processor does not check them.
+Evidence is validated by the case management system when it is uploaded (accepted formats per evidence type, file size, attachment and metadata), so the processor assumes documents are valid and does not check them again. A failure is treated as either a service outage or, as a safety net, a document error.
 
 ### Service outage (not counted)
 
@@ -115,22 +115,9 @@ CouchDB, Tika or Solr cannot be reached (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN
 
 The document is marked `ERROR` but the attempt is **not** counted. The run stops, because every remaining document would fail the same way. Runs are paused for 30 s, doubling per consecutive outage up to 10 min, and resume on their own once the service is back.
 
-### Document errors (counted)
+### Document errors (safety net)
 
-| Step       | Cause                                                                    | `lastError`                                                                                     |
-| ---------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
-| Checks     | The document has no attachment                                           | `No attachments found`                                                                          |
-| Checks     | The document has no file metadata                                        | `Document metadata missing`                                                                     |
-| Checks     | The file is larger than `MAX_FILE_SIZE_MB`                               | `File too large: <size>MB`                                                                      |
-| Download   | The attachment is missing in CouchDB                                     | `Request failed with status code 404`                                                           |
-| Decryption | Wrong key, IV or auth tag, or the file is corrupted                      | `Unsupported state or unable to authenticate data`                                              |
-| Decryption | Malformed key, IV or auth tag                                            | `Invalid key length`, `Invalid initialization vector`, `Invalid authentication tag length: <n>` |
-| Tika       | The file cannot be parsed (corrupt, password-protected, unknown content) | `Request failed with status code 422` (also 415 or 500)                                         |
-| Tika       | Extraction takes longer than `TIKA_TIMEOUT`                              | `timeout of <TIKA_TIMEOUT>ms exceeded`                                                          |
-| Solr       | Solr rejects the document, for example a field over its size limit       | `Request failed with status code 400` (also 500)                                                |
-| Any        | The connection is reset while a request is in flight                     | `socket hang up` or `read ECONNRESET`                                                           |
-
-Each document error increments `retryCount` and stores `lastError`. On the 3rd one the document is marked `FAILED` and is no longer selected. Processing carries on with the next document.
+Document errors are not expected, because evidence is validated at upload. If one happens anyway, it is counted against the document: `retryCount` is incremented and `lastError` stored. On the 3rd one the document is marked `FAILED` and is no longer selected, so it cannot be retried forever. Processing carries on with the next document.
 
 A NiFi failure is not counted: it is logged and the document is still completed.
 
