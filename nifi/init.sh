@@ -103,7 +103,7 @@ echo "Parameter Context created or already exists"
 echo "Fetching Parameter Context ID..."
 
 # Retry until context appears
-for i in $(seq 1 10); do
+for _ in $(seq 1 10); do
   # Match the context entity itself: its component starts with "name", unlike
   # the referencing components and bound process groups NiFi nests inside it
   # once a flow uses the context (their ids would otherwise be picked up).
@@ -259,7 +259,57 @@ curl -s -X PUT "$BASE_URL/process-groups/$ROOT_PG_ID" \
 
 echo "Parameter Context applied successfully"
 
+# Initialization progress is recorded in NiFi itself, as the Parameter Context
+# description, so it is removed together with the flow:
+#   in-progress - template import started; enable/start not yet confirmed
+#   complete    - initialization finished
+# A flow without a marker (imported by hand or by an older init.sh) is treated
+# like a completed one and left untouched.
+INIT_STATE_IN_PROGRESS="tazama-init:in-progress"
+INIT_STATE_COMPLETE="tazama-init:complete"
+
+# Sets INIT_STATE (complete | in-progress | none) and INIT_CONTEXT_BODY.
+read_init_state() {
+  _response=$(curl -s -w "\n%{http_code}" "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID") || true
+  _code=$(echo "$_response" | tail -n1)
+  INIT_CONTEXT_BODY=$(echo "$_response" | sed '$d')
+  if [ "$_code" != "200" ]; then
+    echo "ERROR: could not read Parameter Context $PARAM_CONTEXT_ID (HTTP $_code)"
+    echo "$INIT_CONTEXT_BODY"
+    exit 1
+  fi
+  case "$INIT_CONTEXT_BODY" in
+    *"\"description\":\"$INIT_STATE_COMPLETE\""*) INIT_STATE=complete ;;
+    *"\"description\":\"$INIT_STATE_IN_PROGRESS\""*) INIT_STATE=in-progress ;;
+    *) INIT_STATE=none ;;
+  esac
+}
+
+# Records the given marker as the Parameter Context description.
+set_init_state() {
+  read_init_state
+  _revision=$(echo "$INIT_CONTEXT_BODY" \
+    | tr -d '\n' \
+    | sed -n 's/^[[:space:]]*{[[:space:]]*"revision":[[:space:]]*{[^}]*"version":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    | head -n 1)
+  if [ -z "$_revision" ]; then
+    echo "ERROR: could not determine Parameter Context revision"
+    exit 1
+  fi
+  _response=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID" \
+    -H "Content-Type: application/json" \
+    -d "{\"revision\":{\"version\":$_revision},\"id\":\"$PARAM_CONTEXT_ID\",\"component\":{\"id\":\"$PARAM_CONTEXT_ID\",\"description\":\"$1\"}}") || true
+  _code=$(echo "$_response" | tail -n1)
+  if [ "$_code" != "200" ]; then
+    echo "ERROR: could not record initialization state '$1' (HTTP $_code)"
+    echo "$_response" | sed '$d'
+    exit 1
+  fi
+}
+
 IMPORT_NIFI_TEMPLATE="${IMPORT_NIFI_TEMPLATE:-true}"
+TEMPLATE_ALREADY_PRESENT=false
+RESUME_INIT=false
 
 if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
   TEMPLATE_FILE="${NIFI_TEMPLATE_FILE:-/nifi/tazama.xml}"
@@ -271,15 +321,30 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
     exit 1
   fi
 
-  # Idempotency guard: if the target process group already has components
-  # (controller services / processors), the flow was imported before. Skip
-  # upload + instantiation so a re-run never duplicates the canvas.
-  EXISTING_SERVICES=$(curl -s "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services")
+  # Idempotency guard: if the target process group already has controller
+  # services, the flow was imported before. Skip upload + instantiation so a
+  # re-run never duplicates the canvas. A failed read must not be mistaken for
+  # an empty group, or the flow would be imported a second time.
+  EXISTING_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services") || true
+  EXISTING_HTTP_CODE=$(echo "$EXISTING_RESPONSE" | tail -n1)
+  EXISTING_SERVICES=$(echo "$EXISTING_RESPONSE" | sed '$d')
+  if [ "$EXISTING_HTTP_CODE" != "200" ] || ! echo "$EXISTING_SERVICES" | tr -d '\n' | grep -q '"controllerServices"'; then
+    echo "ERROR: could not list controller services in process group $TEMPLATE_TARGET_PG_ID (HTTP $EXISTING_HTTP_CODE)"
+    echo "$EXISTING_SERVICES"
+    exit 1
+  fi
+
   if echo "$EXISTING_SERVICES" | tr -d '\n' | grep -q '"controllerServices":\[{'; then
-    echo "Flow already present in process group $TEMPLATE_TARGET_PG_ID - skipping template import"
     TEMPLATE_ALREADY_PRESENT=true
+    read_init_state
+    if [ "$INIT_STATE" = "in-progress" ]; then
+      echo "Flow present but a previous initialization did not complete - resuming"
+      RESUME_INIT=true
+    else
+      echo "Flow already present in process group $TEMPLATE_TARGET_PG_ID - skipping template import"
+    fi
   else
-    TEMPLATE_ALREADY_PRESENT=false
+    set_init_state "$INIT_STATE_IN_PROGRESS"
   fi
 
   if [ "$TEMPLATE_ALREADY_PRESENT" = "false" ]; then
@@ -388,11 +453,17 @@ else
   echo "Template import skipped (IMPORT_NIFI_TEMPLATE=false)"
 fi
 
-# Enable services and start the flow only for a newly instantiated template.
-# On a re-run where the flow already exists (TEMPLATE_ALREADY_PRESENT=true)
-# the operator's current state - including a deliberately stopped flow -
-# must be preserved, so no state changes are issued.
-if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "$TEMPLATE_ALREADY_PRESENT" != "true" ] && [ "${NIFI_AUTO_START:-true}" = "true" ]; then
+# Enable services and start the flow for a newly instantiated template, or to
+# resume an initialization that did not complete (for example when nifi-init
+# is restarted by "restart: on-failure" after a failed start). Once
+# initialization has completed, the operator's current state - including a
+# deliberately stopped flow - is preserved, so no state changes are issued.
+#
+# Every curl below ends in "|| true": with "set -e" a transport failure
+# (connection refused/reset) would otherwise end the script instead of going
+# through the retry handling. curl then reports HTTP code 000.
+if [ "$IMPORT_NIFI_TEMPLATE" = "true" ] && { [ "$TEMPLATE_ALREADY_PRESENT" != "true" ] || [ "$RESUME_INIT" = "true" ]; }; then
+  if [ "${NIFI_AUTO_START:-true}" = "true" ]; then
     echo "Enabling controller services..."
 
     ENABLE_RETRIES="${NIFI_ENABLE_RETRIES:-30}"
@@ -403,7 +474,7 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "$TEMPLATE_ALREADY_PRESENT"
     while [ "$ENABLE_ATTEMPT" -le "$ENABLE_RETRIES" ]; do
       ENABLE_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services" \
         -H "Content-Type: application/json" \
-        -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"ENABLED\"}")
+        -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"ENABLED\"}") || true
       ENABLE_HTTP_CODE=$(echo "$ENABLE_RESPONSE" | tail -n1)
       ENABLE_BODY=$(echo "$ENABLE_RESPONSE" | sed '$d')
 
@@ -412,7 +483,7 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "$TEMPLATE_ALREADY_PRESENT"
         echo "$ENABLE_BODY"
       fi
 
-      SERVICES_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services")
+      SERVICES_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services") || true
       SERVICES_HTTP_CODE=$(echo "$SERVICES_RESPONSE" | tail -n1)
       SERVICES_BODY=$(echo "$SERVICES_RESPONSE" | sed '$d')
 
@@ -425,18 +496,20 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "$TEMPLATE_ALREADY_PRESENT"
         continue
       fi
 
-      NOT_ENABLED_COUNT=$(echo "$SERVICES_BODY" \
-        | tr -d '\n' \
-        | sed 's/},{/}\n{/g' \
-        | grep -c '"state":"DISABLED"\|"state":"ENABLING"\|"state":"DISABLING"' || true)
+      # Count each service's own run status. The component "state" fields
+      # also appear for the processors that reference a service, so they
+      # cannot be used to tell whether the services themselves are enabled.
+      SERVICES_TOTAL=$(echo "$SERVICES_BODY" | tr -d '\n' | grep -o '"runStatus":"[A-Z]*"' | wc -l | tr -d ' ')
+      SERVICES_ENABLED_COUNT=$(echo "$SERVICES_BODY" | tr -d '\n' | grep -o '"runStatus":"ENABLED"' | wc -l | tr -d ' ')
+      NOT_ENABLED_COUNT=$((SERVICES_TOTAL - SERVICES_ENABLED_COUNT))
 
-      if [ "$NOT_ENABLED_COUNT" = "0" ]; then
-        echo "All controller services are ENABLED"
+      if [ "$SERVICES_TOTAL" -gt 0 ] && [ "$NOT_ENABLED_COUNT" -eq 0 ]; then
+        echo "All $SERVICES_TOTAL controller services are ENABLED"
         SERVICES_ENABLED=true
         break
       fi
 
-      echo "Waiting for controller services to enable (attempt $ENABLE_ATTEMPT/$ENABLE_RETRIES, $NOT_ENABLED_COUNT pending)..."
+      echo "Waiting for controller services to enable (attempt $ENABLE_ATTEMPT/$ENABLE_RETRIES, $NOT_ENABLED_COUNT of $SERVICES_TOTAL pending)..."
       ENABLE_ATTEMPT=$((ENABLE_ATTEMPT + 1))
       sleep "$ENABLE_DELAY_SECONDS"
     done
@@ -455,32 +528,50 @@ if [ "${IMPORT_NIFI_TEMPLATE:-true}" = "true" ] && [ "$TEMPLATE_ALREADY_PRESENT"
     while [ "$START_ATTEMPT" -le "$START_RETRIES" ]; do
       START_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID" \
         -H "Content-Type: application/json" \
-        -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"RUNNING\"}")
+        -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"RUNNING\"}") || true
       START_HTTP_CODE=$(echo "$START_RESPONSE" | tail -n1)
       START_BODY=$(echo "$START_RESPONSE" | sed '$d')
 
-      if [ "$START_HTTP_CODE" = "200" ]; then
-        echo "Flow started successfully"
-        FLOW_STARTED=true
-        break
+      if [ "$START_HTTP_CODE" != "200" ]; then
+        echo "WARNING: flow start returned HTTP $START_HTTP_CODE (attempt $START_ATTEMPT/$START_RETRIES)"
+        echo "$START_BODY"
+      else
+        # HTTP 200 only means the request was accepted: NiFi skips processors
+        # that are still validating. Confirm nothing in the group is left
+        # stopped or invalid before reporting success; otherwise start again.
+        GROUP_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/process-groups/$TEMPLATE_TARGET_PG_ID") || true
+        GROUP_HTTP_CODE=$(echo "$GROUP_RESPONSE" | tail -n1)
+        GROUP_BODY=$(echo "$GROUP_RESPONSE" | sed '$d')
+        RUNNING_COUNT=$(echo "$GROUP_BODY" | grep -o '"runningCount":[0-9]*' | head -n 1 | cut -d: -f2)
+        STOPPED_COUNT=$(echo "$GROUP_BODY" | grep -o '"stoppedCount":[0-9]*' | head -n 1 | cut -d: -f2)
+        INVALID_COUNT=$(echo "$GROUP_BODY" | grep -o '"invalidCount":[0-9]*' | head -n 1 | cut -d: -f2)
+
+        if [ "$GROUP_HTTP_CODE" = "200" ] && [ "$STOPPED_COUNT" = "0" ] && [ "$INVALID_COUNT" = "0" ] \
+          && [ -n "$RUNNING_COUNT" ] && [ "$RUNNING_COUNT" -gt 0 ]; then
+          echo "Flow started successfully ($RUNNING_COUNT components running)"
+          FLOW_STARTED=true
+          break
+        fi
+
+        echo "Waiting for all components to start (attempt $START_ATTEMPT/$START_RETRIES, HTTP $GROUP_HTTP_CODE: running=${RUNNING_COUNT:-?} stopped=${STOPPED_COUNT:-?} invalid=${INVALID_COUNT:-?})..."
       fi
 
-      echo "Flow start returned HTTP $START_HTTP_CODE (attempt $START_ATTEMPT/$START_RETRIES)"
-      echo "$START_BODY"
       START_ATTEMPT=$((START_ATTEMPT + 1))
       sleep "$ENABLE_DELAY_SECONDS"
     done
 
     if [ "$FLOW_STARTED" != "true" ]; then
-      echo "ERROR: flow did not start after $START_RETRIES attempts"
+      echo "ERROR: flow did not fully start after $START_RETRIES attempts"
       exit 1
     fi
-else
-  if [ "$TEMPLATE_ALREADY_PRESENT" = "true" ]; then
-    echo "Flow already present - leaving services and flow state untouched (use the NiFi UI to manage an existing flow)"
   else
     echo "Auto enable/start skipped (NIFI_AUTO_START=false)"
   fi
+
+  set_init_state "$INIT_STATE_COMPLETE"
+  echo "Initialization recorded as complete"
+elif [ "$TEMPLATE_ALREADY_PRESENT" = "true" ]; then
+  echo "Flow already present - leaving services and flow state untouched (use the NiFi UI to manage an existing flow)"
 fi
 
 echo "Init script finished"
