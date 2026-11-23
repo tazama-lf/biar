@@ -615,6 +615,32 @@ describe('DocumentProcessor', () => {
       );
     });
 
+    it('ends the run when CouchDB goes down while a document error is saved', async () => {
+      mockCouchDB.findUnprocessedDocs.mockResolvedValue([
+        createValidDoc({ _id: 'doc1', _attachments: {} }),
+        createValidDoc({ _id: 'doc2' }),
+      ]);
+      mockCouchDB.updateStatus.mockImplementation(
+        async (_docId: string, status: string) =>
+          status === 'ERROR'
+            ? Promise.reject(httpError(503))
+            : Promise.resolve(undefined)
+      );
+
+      const processor = getProcessor();
+      await processor.run();
+
+      // The outage is not swallowed: the run stops before doc2 and backs off.
+      expect(mockCouchDB.updateStatus).not.toHaveBeenCalledWith(
+        'doc2',
+        expect.anything()
+      );
+      expect(loggerOf(processor).warn).toHaveBeenCalledWith(
+        expect.stringContaining('pausing processing for 30 s'),
+        'run'
+      );
+    });
+
     it.each([
       ['connection refused', networkError('ECONNREFUSED')],
       ['host not found', networkError('ENOTFOUND')],

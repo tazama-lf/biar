@@ -283,6 +283,9 @@ class DocumentProcessor {
               updateErr,
               'process'
             );
+            // CouchDB went down while saving the failure: end the run so it
+            // backs off, even if the original error was the document's own.
+            if (isServiceUnavailable(updateErr)) throw updateErr;
           }
         );
 
