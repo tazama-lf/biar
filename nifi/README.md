@@ -50,7 +50,7 @@ Secret values must not contain `|`, `&` or `\` (the stock scripts write them wit
 | `NIFI_WEB_HTTPS_PORT` / `NIFI_WEB_HTTPS_HOST`             | `8443` / `0.0.0.0`            | HTTPS listener                                                                           |
 | `NIFI_TLS_SAN`                                            | (none)                        | Extra comma-separated host names/IPs for the generated server certificate                |
 | `NIFI_TLS_DIR`                                            | `$NIFI_HOME/conf/tls`         | Where generated certificates are kept                                                    |
-| `NIFI_TLS_CLIENT_DIR`                                     | `/opt/nifi/machine-identity`  | Where the machine identity certificate is written                                        |
+| `NIFI_TLS_CLIENT_DIR`                                     | `/opt/nifi/machine-identity`  | Where the machine identity certificate is written. Keep the default with this repository's `docker-compose.yaml`: the shared volume is mounted there and `init.sh` reads that path. |
 | `KEYSTORE_PATH` / `KEYSTORE_TYPE`                         | generated / `PKCS12`          | Supply your own server keystore                                                          |
 | `TRUSTSTORE_PATH` / `TRUSTSTORE_TYPE`                     | generated / `PKCS12`          | Supply your own truststore                                                               |
 | `NIFI_ADMIN_GROUP_TIMEOUT`                                | `900`                         | Seconds the admin group set-up waits for NiFi to start                                   |
@@ -98,6 +98,67 @@ Mount the stores and set `KEYSTORE_PATH` and/or `TRUSTSTORE_PATH` (with the matc
 ### Sensitive properties key
 
 NiFi encrypts sensitive flow properties with `nifi.sensitive.props.key`. In `none` mode NiFi generates a random key and stores it in `conf/nifi.properties`. When `keycloak` mode starts on a `conf` volume whose key differs from `NIFI_SENSITIVE_PROPS_KEY`, the wrapper re-encrypts the existing flow with the new key (`nifi.sh set-sensitive-properties-key`), so switching modes keeps controller-service passwords. After that, keep `NIFI_SENSITIVE_PROPS_KEY` unchanged. If you lose it, the sensitive values in the flow cannot be decrypted.
+
+## Flow bootstrap (`init.sh`)
+
+The `nifi-init` service (`curlimages/curl`, see `docker-compose.yaml`) runs `init.sh` once against the NiFi API. It:
+
+1. Creates the `PB_CONTEXT_NAME` Parameter Context with the parameters below and binds it to the target process group `NIFI_TEMPLATE_TARGET_PG_ID` (default: root). Child groups do not inherit a parent's context. On an existing context it only adds missing parameters; it never overwrites existing values.
+2. Imports `tazama.xml` into the target group, unless that group already has its own controller services.
+3. With `NIFI_AUTO_START=true`, enables the controller services and starts the flow, and checks that no component is left stopped or invalid.
+
+### Parameters
+
+`tazama.xml` contains no environment-specific values. It references these parameters:
+
+| Parameter                                                   | From                                                    | Sensitive |
+| ----------------------------------------------------------- | ------------------------------------------------------- | --------- |
+| `pbucket`, `phttp`, `pozone` (names set by `PB_*_NAME`)      | `PB_BUCKET`, `PB_HTTP_VALUE`, `PB_OZONE_ENDPOINT`        | no        |
+| `core_pg_host`, `core_pg_port`, `core_pg_user`              | `CORE_PG_HOST`, `CORE_PG_PORT` (`15432`), `CORE_PG_USER` (`postgres`) | no |
+| `core_pg_password`                                          | `CORE_PG_PASSWORD`                                      | yes       |
+| `cms_pg_host`, `cms_pg_port`, `cms_pg_user`                 | `CMS_PG_HOST`, `CMS_PG_PORT` (`15433`), `CMS_PG_USER` (`postgres`) | no |
+| `cms_pg_password`                                           | `CMS_PG_PASSWORD`                                       | yes       |
+| `ozone_access_key`, `ozone_secret_key`                      | `S3A_ACCESS_KEY`, `S3A_SECRET_KEY`                      | yes       |
+
+The core pools (`evaluation`, `enrichment`, `raw_history`, `event_history`, `configuration`) use the `core_pg_*` parameters; the `tazama_cms` pool uses `cms_pg_*`.
+
+`init.sh` exits before it changes anything in NiFi if any value without a default is empty. NiFi would otherwise accept an empty host or password and the flow would only fail at runtime. To change a value after the first run, edit the parameter in the NiFi UI (*Parameter Contexts*); re-running `nifi-init` does not overwrite it.
+
+### Other variables
+
+| Variable                                           | Default                                   | Purpose                                                    |
+| -------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------- |
+| `IMPORT_NIFI_TEMPLATE`                             | `true`                                    | Import `NIFI_TEMPLATE_FILE` (`/nifi/tazama.xml`)            |
+| `NIFI_AUTO_START`                                  | `true`                                    | Enable services and start the flow after a fresh import    |
+| `NIFI_BASE_URL`                                    | `http://nifi:8088/nifi-api` (`none`), `https://nifi:8443/nifi-api` (`keycloak`) | NiFi API address. The ports follow `NIFI_WEB_HTTP_PORT` / `NIFI_WEB_HTTPS_PORT`. |
+| `NIFI_API_WAIT_RETRIES` / `NIFI_API_WAIT_DELAY_SECONDS` | `60` / `5`                            | Wait for the API and for write access to the canvas        |
+| `NIFI_ENABLE_RETRIES` / `NIFI_ENABLE_DELAY_SECONDS` | `30` / `5`                               | Wait for controller services to enable                     |
+| `NIFI_START_RETRIES`                               | `10`                                      | Attempts to get every component running                    |
+
+### Authentication
+
+`init.sh` follows `NIFI_AUTH`. In `none` mode it calls the API over plain HTTP. In `keycloak` mode it calls `https://nifi:8443` with the [machine identity](#what-happens-at-start-up) certificate. For that, `docker-compose.yaml` mounts the `nifi_machine_identity` volume at `/opt/nifi/machine-identity` read-write in `nifi` and read-only in `nifi-init`, and runs `nifi-init` as uid 1000. `init.sh` always reads that path, so leave `NIFI_TLS_CLIENT_DIR` at its default. On a fresh install `init.sh` waits until the admin group job has granted the machine identity write access to the root process group.
+
+### Re-runs
+
+`init.sh` records its progress as the Parameter Context description (`tazama-init:in-progress`, then `tazama-init:complete`). If `nifi-init` is restarted after a failed enable or start, it resumes. After a completed run, and for flows imported by hand or by an older `init.sh` (no marker), it leaves services and flow state untouched, so a flow an operator stopped stays stopped.
+
+### tazama-stack
+
+The deployed bootstrap is a copy in `tazama-stack/biar/nifi/` (`init.sh` and `tazama.xml`), which needs a matching change when this template is synced. That copy creates only the three `PB_*` parameters and sets credentials after import as literal controller-service properties. With this template, all six DBCP pools would stay invalid on a fresh install there, because `#{core_pg_host}`, `#{core_pg_port}`, `#{core_pg_user}` and the `cms_pg_*` equivalents would be unresolved.
+
+The matching change in `tazama-stack` needs to:
+
+- create the parameters above, with this environment mapping:
+
+  | tazama-stack                                    | biar `init.sh`                      |
+  | ----------------------------------------------- | ----------------------------------- |
+  | `TAZAMA_CORE_PG_PASSWORD`                       | `CORE_PG_PASSWORD`                  |
+  | `TAZAMA_EXT_PG_PASSWORD`                        | `CMS_PG_PASSWORD`                   |
+  | `TAZAMA_S3_ACCESS_KEY` / `TAZAMA_S3_SECRET_KEY` | `S3A_ACCESS_KEY` / `S3A_SECRET_KEY` |
+
+  plus `CORE_PG_HOST`, `CORE_PG_PORT`, `CORE_PG_USER`, `CMS_PG_HOST`, `CMS_PG_PORT` and `CMS_PG_USER` for its own database hosts;
+- drop the `set_service_properties` block, which would replace the parameter references with literals.
 
 ## Deployment
 
