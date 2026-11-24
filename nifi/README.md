@@ -50,7 +50,7 @@ Secret values must not contain `|`, `&` or `\` (the stock scripts write them wit
 | `NIFI_WEB_HTTPS_PORT` / `NIFI_WEB_HTTPS_HOST`             | `8443` / `0.0.0.0`            | HTTPS listener                                                                           |
 | `NIFI_TLS_SAN`                                            | (none)                        | Extra comma-separated host names/IPs for the generated server certificate                |
 | `NIFI_TLS_DIR`                                            | `$NIFI_HOME/conf/tls`         | Where generated certificates are kept                                                    |
-| `NIFI_TLS_CLIENT_DIR`                                     | `/opt/nifi/machine-identity`  | Where the machine identity certificate is written                                        |
+| `NIFI_TLS_CLIENT_DIR`                                     | `/opt/nifi/machine-identity`  | Where the machine identity certificate is written. Keep the default with this repository's `docker-compose.yaml`: the shared volume is mounted there and `init.sh` reads that path. |
 | `KEYSTORE_PATH` / `KEYSTORE_TYPE`                         | generated / `PKCS12`          | Supply your own server keystore                                                          |
 | `TRUSTSTORE_PATH` / `TRUSTSTORE_TYPE`                     | generated / `PKCS12`          | Supply your own truststore                                                               |
 | `NIFI_ADMIN_GROUP_TIMEOUT`                                | `900`                         | Seconds the admin group set-up waits for NiFi to start                                   |
@@ -137,7 +137,7 @@ The core pools (`evaluation`, `enrichment`, `raw_history`, `event_history`, `con
 
 ### Authentication
 
-`init.sh` follows `NIFI_AUTH`. In `none` mode it calls the API over plain HTTP. In `keycloak` mode it calls `https://nifi:8443` with the [machine identity](#what-happens-at-start-up) certificate. For that, `docker-compose.yaml` mounts the `nifi_machine_identity` volume read-write in `nifi` and read-only in `nifi-init`, and runs `nifi-init` as uid 1000. On a fresh install `init.sh` waits until the admin group job has granted the machine identity write access to the root process group.
+`init.sh` follows `NIFI_AUTH`. In `none` mode it calls the API over plain HTTP. In `keycloak` mode it calls `https://nifi:8443` with the [machine identity](#what-happens-at-start-up) certificate. For that, `docker-compose.yaml` mounts the `nifi_machine_identity` volume at `/opt/nifi/machine-identity` read-write in `nifi` and read-only in `nifi-init`, and runs `nifi-init` as uid 1000. `init.sh` always reads that path, so leave `NIFI_TLS_CLIENT_DIR` at its default. On a fresh install `init.sh` waits until the admin group job has granted the machine identity write access to the root process group.
 
 ### Re-runs
 

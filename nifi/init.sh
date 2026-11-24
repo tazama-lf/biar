@@ -8,7 +8,10 @@ set -e
 #             the NiFi container writes to the shared nifi_machine_identity
 #             volume. This container must run as uid 1000 to read its key.
 NIFI_AUTH_MODE=$(printf '%s' "${NIFI_AUTH:-none}" | tr '[:upper:]' '[:lower:]')
-MACHINE_IDENTITY_DIR="${NIFI_TLS_CLIENT_DIR:-/opt/nifi/machine-identity}"
+# Fixed path: docker-compose.yaml mounts the shared volume here in both
+# containers. NIFI_TLS_CLIENT_DIR is deliberately not used, because NiFi would
+# write the certificate to that path in its own container, off the volume.
+MACHINE_IDENTITY_DIR="/opt/nifi/machine-identity"
 
 case "$NIFI_AUTH_MODE" in
   none)
@@ -302,16 +305,19 @@ echo "Root PG ID: $ROOT_PG_ID"
 
 TEMPLATE_TARGET_PG_ID="${NIFI_TEMPLATE_TARGET_PG_ID:-$ROOT_PG_ID}"
 
-echo "Fetching revision..."
+# The Parameter Context is bound to the group the template is imported into.
+# NiFi does not inherit a parent group's context, so binding only root would
+# leave the parameter references unresolved in a child target group.
+echo "Fetching revision of process group $TEMPLATE_TARGET_PG_ID..."
 
 # The process group's own revision is the first one in the body.
-REVISION_VERSION=$(nifi_curl -s "$BASE_URL/process-groups/$ROOT_PG_ID" \
+REVISION_VERSION=$(nifi_curl -s "$BASE_URL/process-groups/$TEMPLATE_TARGET_PG_ID" \
   | tr -d '\n' \
   | sed -n 's/^[[:space:]]*{[[:space:]]*"revision":[[:space:]]*{[^}]*"version":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
   | head -n 1)
 
 if [ -z "$REVISION_VERSION" ]; then
-  echo "Failed to determine revision for process group: $ROOT_PG_ID"
+  echo "Failed to determine revision for process group: $TEMPLATE_TARGET_PG_ID"
   exit 1
 fi
 
@@ -319,12 +325,12 @@ echo "Revision: $REVISION_VERSION"
 
 echo "Applying Parameter Context..."
 
-APPLY_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/process-groups/$ROOT_PG_ID" \
+APPLY_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/process-groups/$TEMPLATE_TARGET_PG_ID" \
   -H "Content-Type: application/json" \
   -d "{
     \"revision\": { \"version\": $REVISION_VERSION },
     \"component\": {
-      \"id\": \"$ROOT_PG_ID\",
+      \"id\": \"$TEMPLATE_TARGET_PG_ID\",
       \"parameterContext\": {
         \"id\": \"$PARAM_CONTEXT_ID\"
       }
@@ -333,7 +339,7 @@ APPLY_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/process-grou
 APPLY_HTTP_CODE=$(echo "$APPLY_RESPONSE" | tail -n1)
 
 if [ "$APPLY_HTTP_CODE" != "200" ]; then
-  echo "ERROR: applying Parameter Context to process group $ROOT_PG_ID failed (HTTP $APPLY_HTTP_CODE)"
+  echo "ERROR: applying Parameter Context to process group $TEMPLATE_TARGET_PG_ID failed (HTTP $APPLY_HTTP_CODE)"
   echo "$APPLY_RESPONSE" | sed '$d'
   exit 1
 fi
@@ -405,8 +411,10 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
   # Idempotency guard: if the target process group already has controller
   # services, the flow was imported before. Skip upload + instantiation so a
   # re-run never duplicates the canvas. A failed read must not be mistaken for
-  # an empty group, or the flow would be imported a second time.
-  EXISTING_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services") || true
+  # an empty group, or the flow would be imported a second time. Services of
+  # parent groups are excluded (NiFi includes them by default), so an empty
+  # child target is not mistaken for an imported one.
+  EXISTING_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services?includeAncestorGroups=false") || true
   EXISTING_HTTP_CODE=$(echo "$EXISTING_RESPONSE" | tail -n1)
   EXISTING_SERVICES=$(echo "$EXISTING_RESPONSE" | sed '$d')
   if [ "$EXISTING_HTTP_CODE" != "200" ] || ! echo "$EXISTING_SERVICES" | tr -d '\n' | grep -q '"controllerServices"'; then
@@ -564,7 +572,7 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ] && { [ "$TEMPLATE_ALREADY_PRESENT" != "t
         echo "$ENABLE_BODY"
       fi
 
-      SERVICES_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services") || true
+      SERVICES_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services?includeAncestorGroups=false") || true
       SERVICES_HTTP_CODE=$(echo "$SERVICES_RESPONSE" | tail -n1)
       SERVICES_BODY=$(echo "$SERVICES_RESPONSE" | sed '$d')
 
