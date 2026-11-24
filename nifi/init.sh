@@ -2,8 +2,77 @@
 
 set -e
 
-BASE_URL="${NIFI_BASE_URL:-http://nifi:8088/nifi-api}"
+# NIFI_AUTH selects how this script reaches the NiFi API (see nifi/README.md):
+#   none:     plain HTTP, no authentication.
+#   keycloak: HTTPS, authenticated with the machine identity certificate that
+#             the NiFi container writes to the shared nifi_machine_identity
+#             volume. This container must run as uid 1000 to read its key.
+NIFI_AUTH_MODE=$(printf '%s' "${NIFI_AUTH:-none}" | tr '[:upper:]' '[:lower:]')
+MACHINE_IDENTITY_DIR="${NIFI_TLS_CLIENT_DIR:-/opt/nifi/machine-identity}"
+
+case "$NIFI_AUTH_MODE" in
+  none)
+    BASE_URL="${NIFI_BASE_URL:-http://nifi:${NIFI_WEB_HTTP_PORT:-8088}/nifi-api}"
+    ;;
+  keycloak)
+    BASE_URL="${NIFI_BASE_URL:-https://nifi:${NIFI_WEB_HTTPS_PORT:-8443}/nifi-api}"
+    ;;
+  *)
+    echo "ERROR: unsupported NIFI_AUTH value '${NIFI_AUTH}' (expected none or keycloak)"
+    exit 1
+    ;;
+esac
+
+# Every NiFi API call goes through this wrapper so that it uses the right
+# transport for the auth mode.
+nifi_curl() {
+  if [ "$NIFI_AUTH_MODE" = "keycloak" ]; then
+    curl --cacert "$MACHINE_IDENTITY_DIR/ca.crt" \
+      --cert "$MACHINE_IDENTITY_DIR/machine.crt" \
+      --key "$MACHINE_IDENTITY_DIR/machine.key" \
+      "$@"
+  else
+    curl "$@"
+  fi
+}
+
+echo "NiFi auth mode: $NIFI_AUTH_MODE ($BASE_URL)"
+
 PB_SENSITIVE_FALSE="${PB_SENSITIVE_FALSE:-${PB_SENSITIVE:-false}}"
+
+# Core (five Tazama core DBs) and CMS (tazama_cms) are separate PostgreSQL
+# instances, so each has its own host, port, user and password. Hosts and
+# passwords have no default and are checked below.
+CORE_PG_HOST="${CORE_PG_HOST:-}"
+CORE_PG_PORT="${CORE_PG_PORT:-15432}"
+CORE_PG_USER="${CORE_PG_USER:-postgres}"
+CORE_PG_PASSWORD="${CORE_PG_PASSWORD:-}"
+CMS_PG_HOST="${CMS_PG_HOST:-}"
+CMS_PG_PORT="${CMS_PG_PORT:-15433}"
+CMS_PG_USER="${CMS_PG_USER:-postgres}"
+CMS_PG_PASSWORD="${CMS_PG_PASSWORD:-}"
+
+# Fail fast on missing configuration, before anything is created in NiFi.
+# An empty value would otherwise be stored as a parameter and only fail at
+# runtime: DBCPConnectionPool does not connect when it is enabled, and the
+# PostgreSQL driver replaces an empty host with localhost, so the services
+# enable, the flow starts and the run is recorded as complete. A re-run after
+# fixing .env would not repair it either, because existing parameters are not
+# overwritten (see ensure_param below).
+MISSING_VARS=""
+for _var in PB_CONTEXT_NAME PB_NAME PB_BUCKET PB_HTTP_NAME PB_HTTP_VALUE \
+  PB_OZONE_NAME PB_OZONE_ENDPOINT CORE_PG_HOST CORE_PG_PASSWORD \
+  CMS_PG_HOST CMS_PG_PASSWORD S3A_ACCESS_KEY S3A_SECRET_KEY; do
+  eval "_value=\${$_var:-}"
+  if [ -z "$_value" ]; then
+    MISSING_VARS="$MISSING_VARS $_var"
+  fi
+done
+if [ -n "$MISSING_VARS" ]; then
+  echo "ERROR: required variables are not set:$MISSING_VARS"
+  echo "Set them in .env and run nifi-init again."
+  exit 1
+fi
 
 echo "Waiting for NiFi API to be ready..."
 
@@ -13,10 +82,14 @@ WAIT_DELAY_SECONDS="${NIFI_API_WAIT_DELAY_SECONDS:-5}"
 WAIT_ATTEMPT=1
 
 while [ "$WAIT_ATTEMPT" -le "$WAIT_RETRIES" ]; do
-  if curl -s "$BASE_URL/flow/parameter-contexts" | grep -q "parameterContexts"; then
+  if [ "$NIFI_AUTH_MODE" = "keycloak" ] && [ ! -r "$MACHINE_IDENTITY_DIR/machine.key" ]; then
+    # NiFi writes the certificate at start-up, so it may not exist yet.
+    echo "Machine identity key $MACHINE_IDENTITY_DIR/machine.key not readable yet (attempt $WAIT_ATTEMPT/$WAIT_RETRIES); it needs the nifi_machine_identity volume and uid 1000"
+  elif nifi_curl -s "$BASE_URL/flow/parameter-contexts" | grep -q "parameterContexts"; then
     break
+  else
+    echo "NiFi API not ready yet (attempt $WAIT_ATTEMPT/$WAIT_RETRIES), retrying in ${WAIT_DELAY_SECONDS}s..."
   fi
-  echo "NiFi API not ready yet (attempt $WAIT_ATTEMPT/$WAIT_RETRIES), retrying in ${WAIT_DELAY_SECONDS}s..."
   WAIT_ATTEMPT=$((WAIT_ATTEMPT + 1))
   sleep "$WAIT_DELAY_SECONDS"
 done
@@ -28,18 +101,25 @@ fi
 
 echo "NiFi API is ready"
 
-# Core (five Tazama core DBs) and CMS (tazama_cms) are separate PostgreSQL
-# instances, so each has its own host, port, user and password.
-CORE_PG_HOST="${CORE_PG_HOST:-}"
-CORE_PG_PORT="${CORE_PG_PORT:-15432}"
-CORE_PG_USER="${CORE_PG_USER:-postgres}"
-CORE_PG_PASSWORD="${CORE_PG_PASSWORD:-}"
-CMS_PG_HOST="${CMS_PG_HOST:-}"
-CMS_PG_PORT="${CMS_PG_PORT:-15433}"
-CMS_PG_USER="${CMS_PG_USER:-postgres}"
-CMS_PG_PASSWORD="${CMS_PG_PASSWORD:-}"
-S3A_ACCESS_KEY="${S3A_ACCESS_KEY:-}"
-S3A_SECRET_KEY="${S3A_SECRET_KEY:-}"
+# In keycloak mode the machine identity is NiFi's Initial Admin, but on a fresh
+# install it only gets the root process group policies shortly after start-up
+# (nifi/tazama-admin-group.sh). Wait until it can change the canvas.
+ACCESS_ATTEMPT=1
+while [ "$ACCESS_ATTEMPT" -le "$WAIT_RETRIES" ]; do
+  if nifi_curl -s "$BASE_URL/flow/process-groups/root" \
+    | tr -d '\n' \
+    | grep -q '^{"permissions":{[^}]*"canWrite":true'; then
+    break
+  fi
+  echo "Waiting for write access to the root process group (attempt $ACCESS_ATTEMPT/$WAIT_RETRIES)..."
+  ACCESS_ATTEMPT=$((ACCESS_ATTEMPT + 1))
+  sleep "$WAIT_DELAY_SECONDS"
+done
+
+if [ "$ACCESS_ATTEMPT" -gt "$WAIT_RETRIES" ]; then
+  echo "ERROR: no write access to the root process group after $WAIT_RETRIES attempts"
+  exit 1
+fi
 
 # Build the full parameter list (JSON fragments) from environment variables.
 # Sensitive parameters (core/cms passwords, ozone keys) are stored encrypted by
@@ -79,15 +159,13 @@ add_param_fragment "ozone_secret_key" "$S3A_SECRET_KEY" true
 
 echo "Creating Parameter Context..."
 
-CREATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$BASE_URL/parameter-contexts" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"revision\": { \"version\": 0 },
-    \"component\": {
-      \"name\": \"$PB_CONTEXT_NAME\",
-      \"parameters\": [ $PARAM_FRAGMENTS ]
-    }
-  }")
+# Bodies that carry secrets are sent on stdin so the values never appear in
+# the process list.
+CREATE_RESPONSE=$(printf '{"revision":{"version":0},"component":{"name":"%s","parameters":[%s]}}' \
+    "$(json_escape "$PB_CONTEXT_NAME")" "$PARAM_FRAGMENTS" \
+  | nifi_curl -s -w "\n%{http_code}" -X POST "$BASE_URL/parameter-contexts" \
+    -H "Content-Type: application/json" \
+    --data-binary @-)
 
 HTTP_CODE=$(echo "$CREATE_RESPONSE" | tail -n1)
 BODY=$(echo "$CREATE_RESPONSE" | sed '$d')
@@ -107,7 +185,7 @@ for _ in $(seq 1 10); do
   # Match the context entity itself: its component starts with "name", unlike
   # the referencing components and bound process groups NiFi nests inside it
   # once a flow uses the context (their ids would otherwise be picked up).
-  PARAM_CONTEXT_ID=$(curl -s "$BASE_URL/flow/parameter-contexts" \
+  PARAM_CONTEXT_ID=$(nifi_curl -s "$BASE_URL/flow/parameter-contexts" \
     | tr -d '\n' \
     | sed -n "s/.*\"id\":\"\([^\"]*\)\",\"permissions\":{[^}]*},\"component\":{\"name\":\"$PB_CONTEXT_NAME\",.*/\1/p" \
     | head -n 1)
@@ -129,7 +207,7 @@ echo "Parameter Context ID: $PARAM_CONTEXT_ID"
 
 echo "Ensuring required parameters exist in context..."
 
-CONTEXT_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID")
+CONTEXT_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID")
 CONTEXT_HTTP_CODE=$(echo "$CONTEXT_RESPONSE" | tail -n1)
 CONTEXT_BODY=$(echo "$CONTEXT_RESPONSE" | sed '$d')
 
@@ -187,16 +265,11 @@ if [ "$PARAMS_UPDATED" = "true" ]; then
     exit 1
   fi
 
-  UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"revision\": { \"version\": $CONTEXT_REVISION_VERSION },
-      \"id\": \"$PARAM_CONTEXT_ID\",
-      \"component\": {
-        \"id\": \"$PARAM_CONTEXT_ID\",
-        \"parameters\": [ $UPDATED_PARAMETERS_JSON ]
-      }
-    }")
+  UPDATE_RESPONSE=$(printf '{"revision":{"version":%s},"id":"%s","component":{"id":"%s","parameters":[%s]}}' \
+      "$CONTEXT_REVISION_VERSION" "$PARAM_CONTEXT_ID" "$PARAM_CONTEXT_ID" "$UPDATED_PARAMETERS_JSON" \
+    | nifi_curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID" \
+      -H "Content-Type: application/json" \
+      --data-binary @-)
 
   UPDATE_HTTP_CODE=$(echo "$UPDATE_RESPONSE" | tail -n1)
   UPDATE_BODY=$(echo "$UPDATE_RESPONSE" | sed '$d')
@@ -214,7 +287,7 @@ fi
 
 echo "Fetching Root Process Group ID..."
 
-ROOT_PG_ID=$(curl -s "$BASE_URL/flow/process-groups/root" \
+ROOT_PG_ID=$(nifi_curl -s "$BASE_URL/flow/process-groups/root" \
   | tr -d '\n' \
   | awk -F'"id":"' '{print $2}' \
   | cut -d'"' -f1 \
@@ -231,9 +304,10 @@ TEMPLATE_TARGET_PG_ID="${NIFI_TEMPLATE_TARGET_PG_ID:-$ROOT_PG_ID}"
 
 echo "Fetching revision..."
 
-REVISION_VERSION=$(curl -s "$BASE_URL/process-groups/$ROOT_PG_ID" \
+# The process group's own revision is the first one in the body.
+REVISION_VERSION=$(nifi_curl -s "$BASE_URL/process-groups/$ROOT_PG_ID" \
   | tr -d '\n' \
-  | sed -n 's/.*"version":\([0-9]*\).*/\1/p' \
+  | sed -n 's/^[[:space:]]*{[[:space:]]*"revision":[[:space:]]*{[^}]*"version":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
   | head -n 1)
 
 if [ -z "$REVISION_VERSION" ]; then
@@ -245,7 +319,7 @@ echo "Revision: $REVISION_VERSION"
 
 echo "Applying Parameter Context..."
 
-curl -s -X PUT "$BASE_URL/process-groups/$ROOT_PG_ID" \
+APPLY_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/process-groups/$ROOT_PG_ID" \
   -H "Content-Type: application/json" \
   -d "{
     \"revision\": { \"version\": $REVISION_VERSION },
@@ -255,7 +329,14 @@ curl -s -X PUT "$BASE_URL/process-groups/$ROOT_PG_ID" \
         \"id\": \"$PARAM_CONTEXT_ID\"
       }
     }
-  }" >/dev/null
+  }") || true
+APPLY_HTTP_CODE=$(echo "$APPLY_RESPONSE" | tail -n1)
+
+if [ "$APPLY_HTTP_CODE" != "200" ]; then
+  echo "ERROR: applying Parameter Context to process group $ROOT_PG_ID failed (HTTP $APPLY_HTTP_CODE)"
+  echo "$APPLY_RESPONSE" | sed '$d'
+  exit 1
+fi
 
 echo "Parameter Context applied successfully"
 
@@ -270,7 +351,7 @@ INIT_STATE_COMPLETE="tazama-init:complete"
 
 # Sets INIT_STATE (complete | in-progress | none) and INIT_CONTEXT_BODY.
 read_init_state() {
-  _response=$(curl -s -w "\n%{http_code}" "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID") || true
+  _response=$(nifi_curl -s -w "\n%{http_code}" "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID") || true
   _code=$(echo "$_response" | tail -n1)
   INIT_CONTEXT_BODY=$(echo "$_response" | sed '$d')
   if [ "$_code" != "200" ]; then
@@ -296,7 +377,7 @@ set_init_state() {
     echo "ERROR: could not determine Parameter Context revision"
     exit 1
   fi
-  _response=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID" \
+  _response=$(nifi_curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/parameter-contexts/$PARAM_CONTEXT_ID" \
     -H "Content-Type: application/json" \
     -d "{\"revision\":{\"version\":$_revision},\"id\":\"$PARAM_CONTEXT_ID\",\"component\":{\"id\":\"$PARAM_CONTEXT_ID\",\"description\":\"$1\"}}") || true
   _code=$(echo "$_response" | tail -n1)
@@ -325,7 +406,7 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
   # services, the flow was imported before. Skip upload + instantiation so a
   # re-run never duplicates the canvas. A failed read must not be mistaken for
   # an empty group, or the flow would be imported a second time.
-  EXISTING_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services") || true
+  EXISTING_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services") || true
   EXISTING_HTTP_CODE=$(echo "$EXISTING_RESPONSE" | tail -n1)
   EXISTING_SERVICES=$(echo "$EXISTING_RESPONSE" | sed '$d')
   if [ "$EXISTING_HTTP_CODE" != "200" ] || ! echo "$EXISTING_SERVICES" | tr -d '\n' | grep -q '"controllerServices"'; then
@@ -353,7 +434,7 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
 
   echo "Uploading NiFi template from $TEMPLATE_FILE ..."
 
-  UPLOAD_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+  UPLOAD_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" -X POST \
     "$BASE_URL/process-groups/$TEMPLATE_TARGET_PG_ID/templates/upload" \
     -H "Content-Type: multipart/form-data" \
     -F "template=@$TEMPLATE_FILE")
@@ -370,7 +451,7 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
         EXISTING_TEMPLATE_NAME="$TEMPLATE_NAME"
       fi
 
-      TEMPLATES_BODY=$(curl -s "$BASE_URL/flow/templates")
+      TEMPLATES_BODY=$(nifi_curl -s "$BASE_URL/flow/templates")
       TEMPLATE_ID=$(echo "$TEMPLATES_BODY" \
         | tr -d '\n' \
         | sed 's/},{/}\n{/g' \
@@ -429,7 +510,7 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ]; then
 
   echo "Instantiating template ID: $TEMPLATE_ID"
 
-  INSTANTIATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+  INSTANTIATE_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" -X POST \
     "$BASE_URL/process-groups/$TEMPLATE_TARGET_PG_ID/template-instance" \
     -H "Content-Type: application/json" \
     -d "{
@@ -472,7 +553,7 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ] && { [ "$TEMPLATE_ALREADY_PRESENT" != "t
     SERVICES_ENABLED=false
 
     while [ "$ENABLE_ATTEMPT" -le "$ENABLE_RETRIES" ]; do
-      ENABLE_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services" \
+      ENABLE_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services" \
         -H "Content-Type: application/json" \
         -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"ENABLED\"}") || true
       ENABLE_HTTP_CODE=$(echo "$ENABLE_RESPONSE" | tail -n1)
@@ -483,7 +564,7 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ] && { [ "$TEMPLATE_ALREADY_PRESENT" != "t
         echo "$ENABLE_BODY"
       fi
 
-      SERVICES_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services") || true
+      SERVICES_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID/controller-services") || true
       SERVICES_HTTP_CODE=$(echo "$SERVICES_RESPONSE" | tail -n1)
       SERVICES_BODY=$(echo "$SERVICES_RESPONSE" | sed '$d')
 
@@ -526,7 +607,7 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ] && { [ "$TEMPLATE_ALREADY_PRESENT" != "t
     FLOW_STARTED=false
 
     while [ "$START_ATTEMPT" -le "$START_RETRIES" ]; do
-      START_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID" \
+      START_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/flow/process-groups/$TEMPLATE_TARGET_PG_ID" \
         -H "Content-Type: application/json" \
         -d "{\"id\": \"$TEMPLATE_TARGET_PG_ID\", \"state\": \"RUNNING\"}") || true
       START_HTTP_CODE=$(echo "$START_RESPONSE" | tail -n1)
@@ -539,7 +620,7 @@ if [ "$IMPORT_NIFI_TEMPLATE" = "true" ] && { [ "$TEMPLATE_ALREADY_PRESENT" != "t
         # HTTP 200 only means the request was accepted: NiFi skips processors
         # that are still validating. Confirm nothing in the group is left
         # stopped or invalid before reporting success; otherwise start again.
-        GROUP_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/process-groups/$TEMPLATE_TARGET_PG_ID") || true
+        GROUP_RESPONSE=$(nifi_curl -s -w "\n%{http_code}" "$BASE_URL/process-groups/$TEMPLATE_TARGET_PG_ID") || true
         GROUP_HTTP_CODE=$(echo "$GROUP_RESPONSE" | tail -n1)
         GROUP_BODY=$(echo "$GROUP_RESPONSE" | sed '$d')
         RUNNING_COUNT=$(echo "$GROUP_BODY" | grep -o '"runningCount":[0-9]*' | head -n 1 | cut -d: -f2)
