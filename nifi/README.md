@@ -99,6 +99,67 @@ Mount the stores and set `KEYSTORE_PATH` and/or `TRUSTSTORE_PATH` (with the matc
 
 NiFi encrypts sensitive flow properties with `nifi.sensitive.props.key`. In `none` mode NiFi generates a random key and stores it in `conf/nifi.properties`. When `keycloak` mode starts on a `conf` volume whose key differs from `NIFI_SENSITIVE_PROPS_KEY`, the wrapper re-encrypts the existing flow with the new key (`nifi.sh set-sensitive-properties-key`), so switching modes keeps controller-service passwords. After that, keep `NIFI_SENSITIVE_PROPS_KEY` unchanged. If you lose it, the sensitive values in the flow cannot be decrypted.
 
+## Flow bootstrap (`init.sh`)
+
+The `nifi-init` service (`curlimages/curl`, see `docker-compose.yaml`) runs `init.sh` once against the NiFi API. It:
+
+1. Creates the `PB_CONTEXT_NAME` Parameter Context with the parameters below and binds it to the root process group. On an existing context it only adds missing parameters; it never overwrites existing values.
+2. Imports `tazama.xml` into `NIFI_TEMPLATE_TARGET_PG_ID` (default: root), unless that group already has controller services.
+3. With `NIFI_AUTO_START=true`, enables the controller services and starts the flow, and checks that no component is left stopped or invalid.
+
+### Parameters
+
+`tazama.xml` contains no environment-specific values. It references these parameters:
+
+| Parameter                                                   | From                                                    | Sensitive |
+| ----------------------------------------------------------- | ------------------------------------------------------- | --------- |
+| `pbucket`, `phttp`, `pozone` (names set by `PB_*_NAME`)      | `PB_BUCKET`, `PB_HTTP_VALUE`, `PB_OZONE_ENDPOINT`        | no        |
+| `core_pg_host`, `core_pg_port`, `core_pg_user`              | `CORE_PG_HOST`, `CORE_PG_PORT` (`15432`), `CORE_PG_USER` (`postgres`) | no |
+| `core_pg_password`                                          | `CORE_PG_PASSWORD`                                      | yes       |
+| `cms_pg_host`, `cms_pg_port`, `cms_pg_user`                 | `CMS_PG_HOST`, `CMS_PG_PORT` (`15433`), `CMS_PG_USER` (`postgres`) | no |
+| `cms_pg_password`                                           | `CMS_PG_PASSWORD`                                       | yes       |
+| `ozone_access_key`, `ozone_secret_key`                      | `S3A_ACCESS_KEY`, `S3A_SECRET_KEY`                      | yes       |
+
+The core pools (`evaluation`, `enrichment`, `raw_history`, `event_history`, `configuration`) use the `core_pg_*` parameters; the `tazama_cms` pool uses `cms_pg_*`.
+
+`init.sh` exits before it changes anything in NiFi if any value without a default is empty. NiFi would otherwise accept an empty host or password and the flow would only fail at runtime. To change a value after the first run, edit the parameter in the NiFi UI (*Parameter Contexts*); re-running `nifi-init` does not overwrite it.
+
+### Other variables
+
+| Variable                                           | Default                                   | Purpose                                                    |
+| -------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------- |
+| `IMPORT_NIFI_TEMPLATE`                             | `true`                                    | Import `NIFI_TEMPLATE_FILE` (`/nifi/tazama.xml`)            |
+| `NIFI_AUTO_START`                                  | `true`                                    | Enable services and start the flow after a fresh import    |
+| `NIFI_BASE_URL`                                    | `http://nifi:8088/nifi-api` (`none`), `https://nifi:8443/nifi-api` (`keycloak`) | NiFi API address. The ports follow `NIFI_WEB_HTTP_PORT` / `NIFI_WEB_HTTPS_PORT`. |
+| `NIFI_API_WAIT_RETRIES` / `NIFI_API_WAIT_DELAY_SECONDS` | `60` / `5`                            | Wait for the API and for write access to the canvas        |
+| `NIFI_ENABLE_RETRIES` / `NIFI_ENABLE_DELAY_SECONDS` | `30` / `5`                               | Wait for controller services to enable                     |
+| `NIFI_START_RETRIES`                               | `10`                                      | Attempts to get every component running                    |
+
+### Authentication
+
+`init.sh` follows `NIFI_AUTH`. In `none` mode it calls the API over plain HTTP. In `keycloak` mode it calls `https://nifi:8443` with the [machine identity](#what-happens-at-start-up) certificate. For that, `docker-compose.yaml` mounts the `nifi_machine_identity` volume read-write in `nifi` and read-only in `nifi-init`, and runs `nifi-init` as uid 1000. On a fresh install `init.sh` waits until the admin group job has granted the machine identity write access to the root process group.
+
+### Re-runs
+
+`init.sh` records its progress as the Parameter Context description (`tazama-init:in-progress`, then `tazama-init:complete`). If `nifi-init` is restarted after a failed enable or start, it resumes. After a completed run, and for flows imported by hand or by an older `init.sh` (no marker), it leaves services and flow state untouched, so a flow an operator stopped stays stopped.
+
+### tazama-stack
+
+The deployed bootstrap is a copy in `tazama-stack/biar/nifi/` (`init.sh` and `tazama.xml`), which needs a matching change when this template is synced. That copy creates only the three `PB_*` parameters and sets credentials after import as literal controller-service properties. With this template, all six DBCP pools would stay invalid on a fresh install there, because `#{core_pg_host}`, `#{core_pg_port}`, `#{core_pg_user}` and the `cms_pg_*` equivalents would be unresolved.
+
+The matching change in `tazama-stack` needs to:
+
+- create the parameters above, with this environment mapping:
+
+  | tazama-stack                                    | biar `init.sh`                      |
+  | ----------------------------------------------- | ----------------------------------- |
+  | `TAZAMA_CORE_PG_PASSWORD`                       | `CORE_PG_PASSWORD`                  |
+  | `TAZAMA_EXT_PG_PASSWORD`                        | `CMS_PG_PASSWORD`                   |
+  | `TAZAMA_S3_ACCESS_KEY` / `TAZAMA_S3_SECRET_KEY` | `S3A_ACCESS_KEY` / `S3A_SECRET_KEY` |
+
+  plus `CORE_PG_HOST`, `CORE_PG_PORT`, `CORE_PG_USER`, `CMS_PG_HOST`, `CMS_PG_PORT` and `CMS_PG_USER` for its own database hosts;
+- drop the `set_service_properties` block, which would replace the parameter references with literals.
+
 ## Deployment
 
 The `docker-compose.yaml` in this repository runs NiFi in `none` mode. For deployment wiring (localhost-only port binding in `none` mode, ports, secrets and the Keycloak client for `keycloak` mode) see `biar/README.md` in [tazama-stack](https://github.com/tazama-lf/tazama-stack).
