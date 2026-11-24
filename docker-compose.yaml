@@ -59,6 +59,9 @@ services:
       - nifi_flowfile:/opt/nifi/nifi-current/flowfile_repository
       - nifi_content:/opt/nifi/nifi-current/content_repository
       - nifi_provenance:/opt/nifi/nifi-current/provenance_repository
+      # Machine identity certificate (NIFI_AUTH=keycloak), shared read-only
+      # with nifi-init. Never share nifi_conf: it holds the CA key.
+      - nifi_machine_identity:/opt/nifi/machine-identity
 
   scm:
     <<: *ozone-common-config
@@ -270,15 +273,18 @@ services:
       "
 
   nifi-init:
-    image: curlimages/curl:latest
+    image: curlimages/curl:8.23.0
     container_name: nifi-init
     restart: on-failure
+    # uid of the nifi user, which owns the machine identity key (mode 0600)
+    user: "1000:1000"
     env_file:
       - .env
     depends_on:
       - nifi
     volumes:
       - ./nifi:/nifi:ro
+      - nifi_machine_identity:/opt/nifi/machine-identity:ro
     entrypoint: ["/bin/sh", "/nifi/init.sh"]
   
   unstructured-pipeline:
@@ -303,6 +309,7 @@ volumes:
   nifi_flowfile:
   nifi_content:
   nifi_provenance:
+  nifi_machine_identity:
   scm_data:
   om_data:
   datanode1_data:
