@@ -103,8 +103,8 @@ NiFi encrypts sensitive flow properties with `nifi.sensitive.props.key`. In `non
 
 The `nifi-init` service (`curlimages/curl`, see `docker-compose.yaml`) runs `init.sh` once against the NiFi API. It:
 
-1. Creates the `PB_CONTEXT_NAME` Parameter Context with the parameters below and binds it to the root process group. On an existing context it only adds missing parameters; it never overwrites existing values.
-2. Imports `tazama.xml` into `NIFI_TEMPLATE_TARGET_PG_ID` (default: root), unless that group already has controller services.
+1. Creates the `PB_CONTEXT_NAME` Parameter Context with the parameters below and binds it to the target process group `NIFI_TEMPLATE_TARGET_PG_ID` (default: root). Child groups do not inherit a parent's context. On an existing context it only adds missing parameters; it never overwrites existing values.
+2. Imports `tazama.xml` into the target group, unless that group already has its own controller services.
 3. With `NIFI_AUTO_START=true`, enables the controller services and starts the flow, and checks that no component is left stopped or invalid.
 
 ### Parameters
