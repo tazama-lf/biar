@@ -34,7 +34,7 @@ def require_api_key(
 ) -> None:
     expected = configured_api_key()
     if not expected:
-        logger.error("%s is not set; refusing trigger requests", API_KEY_ENV)
+        logger.error("ORCHESTRATOR_API_KEY is not set; refusing trigger requests")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"status": "error", "code": 503, "message": "Trigger API key is not configured on the orchestrator"},

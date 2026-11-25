@@ -18,7 +18,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
-from api_key_auth import API_KEY_ENV, api_key_status, require_api_key
+from api_key_auth import api_key_status, require_api_key
 
 # ---------------------------------------------------------------------------
 # New class-based imports — replaces the monolith's function imports:
@@ -73,7 +73,7 @@ except Exception as e:
 app = FastAPI()
 
 if api_key_status() == "missing":
-    print(f"[WARN] {API_KEY_ENV} is not set: /checksubmit will refuse every request until it is")
+    print("[WARN] ORCHESTRATOR_API_KEY is not set: /checksubmit will refuse every request until it is")
 
 # ===================================================================
 # REQUEST MODEL
