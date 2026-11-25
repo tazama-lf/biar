@@ -15,8 +15,10 @@ from queue import Queue
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
+
+from api_key_auth import API_KEY_ENV, api_key_status, require_api_key
 
 # ---------------------------------------------------------------------------
 # New class-based imports — replaces the monolith's function imports:
@@ -70,6 +72,9 @@ except Exception as e:
 
 app = FastAPI()
 
+if api_key_status() == "missing":
+    print(f"[WARN] {API_KEY_ENV} is not set: /checksubmit will refuse every request until it is")
+
 # ===================================================================
 # REQUEST MODEL
 # ===================================================================
@@ -115,6 +120,7 @@ def health():
             "num_workers":           NUM_WORKERS,
             "view_build_in_progress": VIEW_BUILD_IN_PROGRESS,
             "completed_tables":      sorted(COMPLETED_TABLES),
+            "trigger_api_key":       api_key_status(),
         }
 
 # ===================================================================
@@ -250,11 +256,8 @@ for i in range(NUM_WORKERS):
 # MAIN ENDPOINT
 # ===================================================================
 
-@app.post("/checksubmit")
-def submit(
-    req: TriggerRequest,
-    x_api_key: str = Header(None, description="API Key for authentication"),
-):
+@app.post("/checksubmit", dependencies=[Depends(require_api_key)])
+def submit(req: TriggerRequest):
     normalized_req = _normalized_request(req)
 
     payload = {

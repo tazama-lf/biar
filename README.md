@@ -60,7 +60,7 @@ The platform consists of the following components:
    - JupyterHub: [http://localhost:8888](http://localhost:8888)
    - NiFi: [http://localhost:8088](http://localhost:8088) (no authentication; see [NiFi](#nifi))
    - Datalakehouse API: [http://localhost:8282](http://localhost:8282)
-   - Automation Orchestrator API: [http://localhost:7619](http://localhost:7619)
+   - Automation Orchestrator API: [http://localhost:7619](http://localhost:7619) (`POST /checksubmit` requires the `x-api-key` header to match `ORCHESTRATOR_API_KEY`; see [Orchestrator API key](nifi/README.md#orchestrator-api-key))
      Additional ETLs
    - `automation-orchestrator/Table_ETLs/metrics_tms_etl.py`: Pre-aggregates TMS metrics and writes to `gold/metrics/tms` (Hudi). The dashboard prefers this pre-aggregated table when available.
    - Solr Admin: [http://localhost:8983](http://localhost:8983)
