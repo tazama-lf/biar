@@ -1,5 +1,6 @@
 import { LoggerService } from '@tazama-lf/frms-coe-lib';
 import { validateProcessorConfig } from '@tazama-lf/frms-coe-lib/lib/config';
+import axios from 'axios';
 import cron from 'node-cron';
 import { additionalEnvironmentVariables, type Configuration } from './config';
 import { CouchDBService } from './services/CouchDBService';
@@ -11,6 +12,58 @@ import type { IEvidenceDocument } from './interfaces/iEvidenceDocument';
 
 const BYTES_PER_KB = 1024;
 const BYTES_PER_MB = BYTES_PER_KB * BYTES_PER_KB;
+
+// A document that fails this many times for a reason of its own is marked
+// FAILED and is no longer selected for processing.
+const MAX_DOCUMENT_ATTEMPTS = 3;
+
+// While a dependency is unavailable, runs are paused for 30 s, doubling per
+// consecutive outage up to 10 min.
+const OUTAGE_BACKOFF_BASE_MS = 30_000;
+const OUTAGE_BACKOFF_MAX_MS = 600_000;
+const OUTAGE_BACKOFF_FACTOR = 2;
+const MS_PER_SECOND = 1000;
+
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_FORBIDDEN = 403;
+const HTTP_REQUEST_TIMEOUT = 408;
+const HTTP_TOO_MANY_REQUESTS = 429;
+const HTTP_BAD_GATEWAY = 502;
+const HTTP_SERVICE_UNAVAILABLE = 503;
+const HTTP_GATEWAY_TIMEOUT = 504;
+
+// Responses that mean the service, not the document, is the problem.
+// 500 is deliberately absent: Tika and Solr return it for individual
+// documents they cannot process.
+const SERVICE_UNAVAILABLE_STATUSES = new Set([
+  HTTP_UNAUTHORIZED,
+  HTTP_FORBIDDEN,
+  HTTP_REQUEST_TIMEOUT,
+  HTTP_TOO_MANY_REQUESTS,
+  HTTP_BAD_GATEWAY,
+  HTTP_SERVICE_UNAVAILABLE,
+  HTTP_GATEWAY_TIMEOUT,
+]);
+
+// Network errors that mean the service could not be reached at all.
+// Response timeouts (ECONNABORTED) and resets (ECONNRESET) are deliberately
+// absent: a single oversized or malformed document can cause them.
+const SERVICE_UNREACHABLE_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+]);
+
+function isServiceUnavailable(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false;
+  if (error.response !== undefined) {
+    return SERVICE_UNAVAILABLE_STATUSES.has(error.response.status);
+  }
+  return error.code !== undefined && SERVICE_UNREACHABLE_CODES.has(error.code);
+}
 
 async function tryCatch<T>(
   fn: () => Promise<T>,
@@ -35,6 +88,8 @@ class DocumentProcessor {
   private readonly solr: SolrService;
   private readonly nifi: NiFiService;
   private readonly decryption: DecryptionService;
+  private consecutiveOutages = 0;
+  private pausedUntil = 0;
 
   constructor() {
     this.config = validateProcessorConfig(
@@ -49,17 +104,41 @@ class DocumentProcessor {
   }
 
   async run(): Promise<void> {
+    if (Date.now() < this.pausedUntil) return;
+
     await tryCatch(
       async () => {
         const documents =
           await this.couchdb.findUnprocessedDocs<IEvidenceDocument>();
         for (const doc of documents) {
+          // Throws only when a dependency is unavailable, which ends the run:
+          // every remaining document would fail the same way.
           await this.processDocument(doc);
         }
+        this.consecutiveOutages = 0;
       },
       (error) => {
+        if (isServiceUnavailable(error)) {
+          this.pauseAfterOutage(error);
+          return;
+        }
         this.logger.error('Job failed: ' + error.message, error, 'run');
       }
+    );
+  }
+
+  private pauseAfterOutage(error: Error): void {
+    this.consecutiveOutages += 1;
+    const delayMs = Math.min(
+      OUTAGE_BACKOFF_BASE_MS *
+        OUTAGE_BACKOFF_FACTOR ** (this.consecutiveOutages - 1),
+      OUTAGE_BACKOFF_MAX_MS
+    );
+    this.pausedUntil = Date.now() + delayMs;
+    this.logger.warn(
+      `Service unavailable (${error.message}); pausing processing for ` +
+        `${delayMs / MS_PER_SECOND} s`,
+      'run'
     );
   }
 
@@ -159,7 +238,7 @@ class DocumentProcessor {
 
         await tryCatch(
           async () => {
-            await this.couchdb.updateStatus(docId, 'COMPLETED');
+            await this.couchdb.updateStatus(docId, 'COMPLETED', undefined, 0);
           },
           (finalizeErr) => {
             this.logger.error(
@@ -177,18 +256,40 @@ class DocumentProcessor {
           error,
           'process'
         );
+
+        // A dependency outage is not the document's fault: keep it eligible
+        // without counting the attempt, then end the run.
+        const serviceUnavailable = isServiceUnavailable(error);
+        const attempts = serviceUnavailable
+          ? undefined
+          : (doc.retryCount ?? 0) + 1;
+        const status =
+          attempts !== undefined && attempts >= MAX_DOCUMENT_ATTEMPTS
+            ? 'FAILED'
+            : 'ERROR';
+
         await tryCatch(
           async () => {
-            await this.couchdb.updateStatus(docId, 'ERROR', error.message);
+            await this.couchdb.updateStatus(
+              docId,
+              status,
+              error.message,
+              attempts
+            );
           },
           (updateErr) => {
             this.logger.error(
-              'Failed to mark ERROR status for ' + docId,
+              'Failed to mark ' + status + ' status for ' + docId,
               updateErr,
               'process'
             );
+            // CouchDB went down while saving the failure: end the run so it
+            // backs off, even if the original error was the document's own.
+            if (isServiceUnavailable(updateErr)) throw updateErr;
           }
         );
+
+        if (serviceUnavailable) throw error;
       }
     );
   }

@@ -97,13 +97,47 @@ npm start
 
 ## Document Processing Flow
 
-1. **Fetch**: Get unprocessed documents from CouchDB (status != COMPLETED, not archived)
+1. **Fetch**: Get unprocessed documents from CouchDB (status not COMPLETED or FAILED, not archived)
 2. **Validate**: Check file size against `MAX_FILE_SIZE_MB` limit
 3. **Decrypt**: If file has encryption metadata, decrypt using AES-256-GCM
 4. **Extract**: Send file to Tika for text and metadata extraction
 5. **Index**: Store extracted content in Solr (truncated to `MAX_SOLR_CONTENT`)
 6. **Forward**: Send full content and metadata to NiFi
 7. **Update**: Mark document as COMPLETED in CouchDB
+
+## Failures and retries
+
+Evidence is validated by the case management system when it is uploaded (accepted formats per evidence type, file size, attachment and metadata), so the processor assumes documents are valid and does not check them again. A failure is treated as either a service outage or, as a safety net, a document error.
+
+### Service outage (not counted)
+
+CouchDB, Tika or Solr cannot be reached (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`), or answers HTTP 401, 403, 408, 429, 502, 503 or 504.
+
+The document is marked `ERROR` but the attempt is **not** counted. The run stops, because every remaining document would fail the same way. Runs are paused for 30 s, doubling per consecutive outage up to 10 min, and resume on their own once the service is back.
+
+### Document errors (safety net)
+
+Document errors are not expected, because evidence is validated at upload. If one happens anyway, it is counted against the document: `retryCount` is incremented and `lastError` stored. On the 3rd one the document is marked `FAILED` and is no longer selected, so it cannot be retried forever. Processing carries on with the next document.
+
+A NiFi failure is not counted: it is logged and the document is still completed.
+
+A successful run resets `retryCount` to 0. `FAILED` documents are kept in CouchDB.
+
+List `FAILED` documents (`COUCHDB_URL` as configured for the processor):
+
+```bash
+curl -s -X POST "$COUCHDB_URL/_find" -H 'Content-Type: application/json' \
+  -d '{"selector": {"processingStatus": "FAILED"}, "fields": ["_id", "evidenceId", "retryCount", "lastError", "processedAt"]}'
+```
+
+Once the cause is fixed, reset a document so it is processed again with a fresh set of attempts (requires `jq`):
+
+```bash
+DOC_ID=<document _id>
+curl -s "$COUCHDB_URL/$DOC_ID" \
+  | jq '.processingStatus = "ERROR" | .retryCount = 0' \
+  | curl -s -X PUT "$COUCHDB_URL/$DOC_ID" -H 'Content-Type: application/json' -d @-
+```
 
 ## Testing
 
