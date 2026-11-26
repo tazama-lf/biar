@@ -77,16 +77,6 @@ if [ -n "$MISSING_VARS" ]; then
   exit 1
 fi
 
-# The trigger processors send ORCHESTRATOR_API_KEY to PB_HTTP_VALUE. Over plain
-# HTTP that is only safe on the Docker network or the same host.
-case "$PB_HTTP_VALUE" in
-  https://* | http://biar-automation-orchestrator:* | http://automation-orchestrator:* | http://localhost:* | http://127.0.0.1:*) ;;
-  *)
-    echo "WARNING: PB_HTTP_VALUE ($PB_HTTP_VALUE) is plain HTTP to another host. NiFi sends ORCHESTRATOR_API_KEY there in the x-api-key header, readable on that network path."
-    echo "         Use http://biar-automation-orchestrator:7619/checksubmit when NiFi and the orchestrator run in the same Compose project, or put TLS in front of the orchestrator."
-    ;;
-esac
-
 echo "Waiting for NiFi API to be ready..."
 
 # Wait until parameter-context API responds properly, with bounded retries.

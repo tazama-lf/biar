@@ -124,14 +124,6 @@ The core pools (`evaluation`, `enrichment`, `raw_history`, `event_history`, `con
 
 `init.sh` exits before it changes anything in NiFi if any value without a default is empty. NiFi would otherwise accept an empty host or password and the flow would only fail at runtime. To change a value after the first run, edit the parameter in the NiFi UI (*Parameter Contexts*); re-running `nifi-init` does not overwrite it.
 
-### Orchestrator API key
-
-Every InvokeHTTP processor that calls the automation orchestrator (`#{phttp}`) sends the header `x-api-key: ${ORCHESTRATOR_API_KEY}`. NiFi resolves it from its own environment, which loads the same `.env` as the orchestrator, so the key is not stored in the flow or in a parameter. The orchestrator rejects requests without the matching key (401), and rejects every request while `ORCHESTRATOR_API_KEY` is empty (503). `init.sh` requires it to be set.
-
-The orchestrator serves plain HTTP, so the key is readable by anyone on the path between NiFi and the orchestrator. Keep `PB_HTTP_VALUE` on the Docker network (default `http://biar-automation-orchestrator:7619/checksubmit`). If NiFi must reach the orchestrator on another host, put TLS in front of the orchestrator or use a trusted private network. `init.sh` prints a warning when `PB_HTTP_VALUE` is plain HTTP to anything other than the orchestrator container or localhost.
-
-A flow imported before this header existed does not get it on the next `nifi-init` run, because the import is skipped once the flow is present. On such a deployment, before upgrading the orchestrator, add a property to each InvokeHTTP processor whose *Remote URL* is `#{phttp}`: name `x-api-key`, value `${ORCHESTRATOR_API_KEY}`. Otherwise those triggers start failing with 401 and the files stay unprocessed.
-
 ### Other variables
 
 | Variable                                           | Default                                   | Purpose                                                    |

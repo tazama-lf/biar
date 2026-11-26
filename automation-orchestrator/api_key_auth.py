@@ -17,14 +17,6 @@ logger = logging.getLogger("api_key_auth")
 API_KEY_ENV = "ORCHESTRATOR_API_KEY"
 
 
-def configured_api_key() -> str:
-    return os.environ.get(API_KEY_ENV, "").strip()
-
-
-def api_key_status() -> str:
-    return "configured" if configured_api_key() else "missing"
-
-
 def require_api_key(
     x_api_key: Optional[str] = Header(  # noqa: UP045 (repo runtime is Python 3.9, `X | None` needs 3.10+)
         None,
@@ -32,7 +24,7 @@ def require_api_key(
         description=f"Shared secret; must match {API_KEY_ENV} on the orchestrator",
     ),
 ) -> None:
-    expected = configured_api_key()
+    expected = os.environ.get(API_KEY_ENV, "").strip()
     if not expected:
         logger.error("ORCHESTRATOR_API_KEY is not set; refusing trigger requests")
         raise HTTPException(

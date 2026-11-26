@@ -18,7 +18,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
-from api_key_auth import api_key_status, require_api_key
+from api_key_auth import require_api_key
 
 # ---------------------------------------------------------------------------
 # New class-based imports — replaces the monolith's function imports:
@@ -72,9 +72,6 @@ except Exception as e:
 
 app = FastAPI()
 
-if api_key_status() == "missing":
-    print("[WARN] ORCHESTRATOR_API_KEY is not set: /checksubmit will refuse every request until it is")
-
 # ===================================================================
 # REQUEST MODEL
 # ===================================================================
@@ -120,7 +117,6 @@ def health():
             "num_workers":           NUM_WORKERS,
             "view_build_in_progress": VIEW_BUILD_IN_PROGRESS,
             "completed_tables":      sorted(COMPLETED_TABLES),
-            "trigger_api_key":       api_key_status(),
         }
 
 # ===================================================================

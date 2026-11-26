@@ -9363,13 +9363,6 @@
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -10435,13 +10428,6 @@
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -12453,13 +12439,6 @@
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -12960,13 +12939,6 @@
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -14017,13 +13989,6 @@
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -17569,13 +17534,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -18999,13 +18957,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -20848,13 +20799,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -27863,13 +27807,6 @@ SELECT array_agg(DISTINCT table_name) FROM information_schema.columns WHERE tabl
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -28370,13 +28307,6 @@ SELECT array_agg(DISTINCT table_name) FROM information_schema.columns WHERE tabl
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -30532,13 +30462,6 @@ SELECT array_agg(DISTINCT table_name) FROM information_schema.columns WHERE tabl
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -32543,13 +32466,6 @@ SELECT array_agg(DISTINCT table_name) FROM information_schema.columns WHERE tabl
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -33272,13 +33188,6 @@ SELECT array_agg(DISTINCT table_name) FROM information_schema.columns WHERE tabl
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -34612,13 +34521,6 @@ SELECT array_agg(DISTINCT table_name) FROM information_schema.columns WHERE tabl
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -36295,13 +36197,6 @@ SELECT array_agg(DISTINCT table_name) FROM information_schema.columns WHERE tabl
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -38334,13 +38229,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -39622,13 +39510,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -41697,13 +41578,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -42539,13 +42413,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -43270,13 +43137,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -43777,13 +43637,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -45603,13 +45456,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -46566,13 +46412,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                             <name>Follow Redirects</name>
                         </value>
                     </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
-                        </value>
-                    </entry>
                 </descriptors>
                 <executionNode>ALL</executionNode>
                 <lossTolerant>false</lossTolerant>
@@ -47391,13 +47230,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
@@ -50253,13 +50085,6 @@ GROUP BY current_database(), cols.table_schema, cols.table_name, cols.column_nam
                         <key>Follow Redirects</key>
                         <value>
                             <name>Follow Redirects</name>
-                        </value>
-                    </entry>
-                    <entry>
-                        <key>x-api-key</key>
-                        <value>
-                            <name>x-api-key</name>
-                            <dynamic>true</dynamic>
                         </value>
                     </entry>
                 </descriptors>
