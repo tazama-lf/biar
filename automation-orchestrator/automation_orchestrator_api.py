@@ -15,8 +15,10 @@ from queue import Queue
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
+
+from api_key_auth import require_api_key
 
 # ---------------------------------------------------------------------------
 # New class-based imports — replaces the monolith's function imports:
@@ -250,11 +252,8 @@ for i in range(NUM_WORKERS):
 # MAIN ENDPOINT
 # ===================================================================
 
-@app.post("/checksubmit")
-def submit(
-    req: TriggerRequest,
-    x_api_key: str = Header(None, description="API Key for authentication"),
-):
+@app.post("/checksubmit", dependencies=[Depends(require_api_key)])
+def submit(req: TriggerRequest):
     normalized_req = _normalized_request(req)
 
     payload = {
